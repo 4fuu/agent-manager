@@ -1,0 +1,14 @@
+[Unit]
+Description=URI Agent microVM manager supervisor
+
+[Service]
+ExecStart=%h/.local/bin/agent-manager serve
+Restart=on-failure
+RestartSec=2
+UMask=0077
+# Microsandbox owns detached VM lifetimes; a supervisor restart must not kill them.
+KillMode=process
+TimeoutStopSec=30
+
+[Install]
+WantedBy=default.target

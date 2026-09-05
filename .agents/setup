@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+version=1.25.1
+if ! command -v go >/dev/null || [[ "$(go version)" != *"go$version "* ]]; then
+  case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64) arch=arm64 ;; *) echo 'Unsupported architecture' >&2; exit 1 ;; esac
+  archive="go${version}.linux-${arch}.tar.gz"
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  echo "Installing Go $version"
+  curl -fsSL "https://go.dev/dl/$archive" -o "$tmp/$archive"
+  expected=$(curl -fsSL 'https://go.dev/dl/?mode=json&include=all' | jq -r --arg f "$archive" '.[] .files[] | select(.filename == $f) | .sha256')
+  [[ -n "$expected" ]]
+  printf '%s  %s\n' "$expected" "$tmp/$archive" | sha256sum -c -
+  mkdir -p "$HOME/.local/lib" "$HOME/.local/bin"
+  tar -xzf "$tmp/$archive" -C "$tmp"
+  rm -rf "$HOME/.local/lib/go-$version"
+  mv "$tmp/go" "$HOME/.local/lib/go-$version"
+  ln -sfn "$HOME/.local/lib/go-$version/bin/go" "$HOME/.local/bin/go"
+  ln -sfn "$HOME/.local/lib/go-$version/bin/gofmt" "$HOME/.local/bin/gofmt"
+fi
+export PATH="$HOME/.local/bin:$PATH"
+echo 'Downloading locked Go dependencies'
+go mod download
+echo 'Building agent-manager (no microVM started)'
+go build -o agent-manager ./cmd/agent-manager

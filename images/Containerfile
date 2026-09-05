@@ -1,0 +1,24 @@
+FROM ubuntu:24.04
+ARG DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl git tmux bash util-linux build-essential pkg-config \
+    python3 python3-venv nodejs npm ripgrep jq libstdc++6 libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Upstream installer verifies release SHA256SUMS and preserves retrieval assets.
+ARG URI_VERSION=2026.904.3
+RUN curl --proto '=https' --tlsv1.2 -fsSL \
+    https://raw.githubusercontent.com/4fuu/uri-agent/bcdbf2f5183ee6f3d924131db6443631dc7d471c/scripts/install.sh \
+    -o /tmp/install-uri-agent \
+    && URI_AGENT_INSTALL_DIR=/opt/uri sh /tmp/install-uri-agent "$URI_VERSION" \
+    && rm /tmp/install-uri-agent
+ENV PATH="/opt/uri:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+ENV LANG=C.UTF-8 TERM=xterm-256color URI_AGENT_CONFIG_DIR=/root/.config/uri-agent
+RUN mkdir -p /workspace /run/manager /root/.config/uri-agent \
+    && chmod 700 /root/.config/uri-agent \
+    && printf 'set -g mouse on\nset -g history-limit 10000\nset -g default-terminal "tmux-256color"\n' > /root/.tmux.conf \
+    && uri-agent --version
+COPY images/manager-git-askpass /usr/local/bin/manager-git-askpass
+RUN chmod 755 /usr/local/bin/manager-git-askpass
+WORKDIR /workspace
+CMD ["/bin/bash"]
