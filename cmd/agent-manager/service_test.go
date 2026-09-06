@@ -135,17 +135,26 @@ using System.Runtime.InteropServices;
 public static class LauncherConsoleProbe {
     [DllImport("kernel32.dll")] static extern bool FreeConsole();
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool AttachConsole(uint pid);
-    public static void Check(uint pid) {
+    [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
+    public static void Check(uint pid, string name) {
         FreeConsole();
         if (AttachConsole(pid)) {
+            var window = GetConsoleWindow();
+            var visible = IsWindowVisible(window);
             FreeConsole();
-            throw new Exception("Service process allocated a console: " + pid);
+            throw new Exception(name + " " + pid + " console=" + window + " visible=" + visible);
         }
         if (Marshal.GetLastWin32Error() != 6) throw new Exception("Console probe failed");
     }
 }
 '@
-foreach ($process in $processes) { [LauncherConsoleProbe]::Check($process.ProcessId) }
+$failures = @()
+foreach ($process in $processes) {
+    try { [LauncherConsoleProbe]::Check($process.ProcessId, $process.Name) }
+    catch { $failures += $_.Exception.Message }
+}
+if ($failures.Count) { throw ($failures -join '; ') }
 `
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
