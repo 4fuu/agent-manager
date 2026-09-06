@@ -129,7 +129,8 @@ a macOS GUI login session available, respectively.
 
 On Windows the check builds the GUI-subsystem service host, then probes all four
 service processes (task host, PowerShell, worker host and supervisor) to reject any
-allocated console. Unit checks also verify console-free native commands and
+console window, including hidden windows; windowless console objects are allowed.
+Unit checks also verify windowless native commands and
 Windows argument quoting. Set `AGENT_MANAGER_SERVICE_BINARY` to an extracted
 release executable to test that bundle and its companion host instead of building
 from source; the release workflow does this before publishing Windows archives.
