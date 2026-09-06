@@ -20,10 +20,27 @@ creates another sandbox. The supervisor preserves attachments across UI exits.
 OSC titles affect only the leftmost pane's automatic Session title; a manual Name
 takes precedence.
 
-Stop cancels work and stops the VM while retaining its managed disk. Delete removes
+Session Stop cancels work and stops the VM while retaining its managed disk. Delete removes
 the disk but retains host mappings and manager logs. On restart, known runtime
 identities are inspected without booting; a missing known identity is reported and
 never replaced automatically. Host reboot does not restore RAM processes.
+
+The `agent-manager stop` command stops the supervisor instead:
+it detaches guest clients and retains running guests. `uninstall` additionally
+removes its login registration, not its state or disks. Service stop waits for
+both IPC shutdown and the supervisor lifetime lock to be released before allowing
+a subsequent start. The private IPC endpoint exposes health and shutdown using
+the same current-user authentication as normal RPC.
+
+Native registration must preserve detached guest processes. Linux units use
+`KillMode=process`; macOS LaunchAgents use `AbandonProcessGroup`. On Windows,
+microsandbox 0.6.17 [requests CREATE_BREAKAWAY_FROM_JOB for detached guests](https://github.com/superradcompany/microsandbox/blob/v0.6.17/sdk/rust/lib/runtime/spawn.rs#L547-L554),
+which fails in Task Scheduler's restrictive job. The login task therefore uses
+local WMI process creation with that flag to launch a same-user background worker
+outside the task job, and waits for its exit. It transfers the login environment
+in memory, not into task XML. Guest execution still goes through `internal/backend`;
+WMI only starts the host supervisor. Do not replace this with direct task-child
+execution or attached microVMs without rechecking native guest lifetimes.
 
 ## Images
 

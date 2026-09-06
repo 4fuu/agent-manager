@@ -77,18 +77,25 @@ manual downloads and source builds.
 
 ### Start the manager
 
+The managed login service commands require v2026.906.1 or later.
+Keep the executable at a stable path when using them.
+
 In a new terminal after installation:
 
 ```sh
 agent-manager --version
 agent-manager runtime-install
 agent-manager doctor
-agent-manager serve
+agent-manager install
+agent-manager
 ```
 
-Keep the supervisor running and run `agent-manager` in another terminal.
-`doctor` checks native runtime prerequisites; [Windows setup](docs/usage.md#windows)
-explains how to enable WHP when needed.
+`install` registers the supervisor for login autostart for the current user and
+starts it immediately. It is not a system boot service and normally needs no
+administrator privileges. `runtime-install` and `doctor` remain separate runtime
+prerequisites; [Windows setup](docs/usage.md#windows) explains how to enable WHP
+when needed. See [installation](docs/installation.md#managed-login-service)
+for platform requirements, upgrades, custom state directories and cleanup.
 
 ### Start your first Session
 

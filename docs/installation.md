@@ -67,24 +67,91 @@ repair a damaged installation. Add the install directory to PATH when prompted.
 
 The scripts use HTTPS and verify the exact archive entry in `SHA256SUMS` before
 running the binary's version check. They do not install the runtime, create VMs,
-modify project configuration or start a supervisor.
+modify project configuration or register a supervisor login service.
 
 ## Runtime and first launch
+
+> [!NOTE]
+> The `install`, `start`, `stop`, `status`, and `uninstall` service commands are
+> available in v2026.906.1 and later. For v2026.906.0, run `serve` in a separate
+> terminal or upgrade before following the managed-service instructions.
 
 ```sh
 agent-manager --version
 agent-manager runtime-install
 agent-manager doctor
-agent-manager serve
+agent-manager install
+agent-manager
 ```
 
-Run `agent-manager` in a second terminal. `runtime-install` downloads the pinned
+`runtime-install` downloads the pinned
 microsandbox runtime and firmware into `~/.microsandbox` (`MSB_HOME` overrides
 this). The SDK's FFI library is embedded in the executable and extracted there
 when first needed. No development toolchain is required to run a release bundle.
+`doctor` checks the native runtime separately. A successful service installation
+does not imply that the hypervisor or runtime is ready.
 
 Use the [first Session walkthrough](../README.md#start-your-first-session), then
 see [usage](usage.md) for image downloads and configuration mappings.
+
+## Managed login service
+
+The following commands manage one current-user registration:
+
+```sh
+agent-manager install [--state DIR]
+agent-manager start [--state DIR]
+agent-manager stop [--state DIR]
+agent-manager status [--state DIR]
+agent-manager uninstall [--state DIR]
+```
+
+Use exactly the same `--state DIR` on every lifecycle command and when launching
+the UI. Registrations are keyed by the canonical state path, so different state
+directories create independent registrations. Omitting `--state` consistently
+uses the platform default.
+
+- `install` registers login autostart for the current user and starts the
+  supervisor immediately. Reinstalling gracefully stops the existing supervisor,
+  refreshes the registered executable path and captured `MSB_HOME`, then starts it.
+- `start` requires an installed registration and waits for the private supervisor
+  IPC endpoint to become ready.
+- `stop` gracefully stops the supervisor and leaves login autostart installed.
+  Existing guests are detached and their disks are retained.
+- `status` reports whether a registration exists, native service state, IPC
+  readiness, the canonical state directory and the lifecycle log path.
+- `uninstall` stops the supervisor and removes its native registration. It retains
+  manager state, runtime caches, images and guest disks, and does not remove the
+  `agent-manager` program.
+
+The registration captures `MSB_HOME` at installation. Other variables from the
+interactive shell are not promised in the service environment. The lifecycle log
+is `STATE/supervisor-service.log`; it is overwritten on each service start and
+never contains persisted guest terminal output. `serve` remains available for a
+foreground supervisor. `--fake` is test infrastructure accepted only by `serve`
+and `install`; an install records that choice in the registration.
+
+Keep the registered executable at a stable path. Before upgrading, stop the
+service. After any upgrade or executable move—including versioned package-manager
+or Unix installer paths—rerun `agent-manager install` to refresh the registration.
+Before removing the application, run `agent-manager uninstall` with the matching
+state directory.
+
+Native registration uses:
+
+- **Windows:** an interactive-user Task Scheduler task with least privilege and a
+  hidden PowerShell/WMI launcher. Task Scheduler, Windows PowerShell and local WMI
+  process creation must be available. No elevation is normally required, although
+  local policy can deny these operations. The user must be logged in for it to run.
+- **Linux:** a `systemd --user` service. A working user systemd session and user
+  bus are required.
+- **macOS:** a LaunchAgent in the `gui/<uid>` domain. The user must have a logged-in
+  GUI session.
+
+These are login services, not machine boot services. Login, reboot and native
+runtime behavior require platform-specific checks separate from unit tests. If
+you previously enabled the legacy manual `contrib/agent-manager.service`, stop and
+disable it before installing the managed service so both do not contend for state.
 
 ## Manual archives and source builds
 
@@ -107,11 +174,13 @@ Native release packaging uses Python 3.11+ and `python script/release.py build`.
 ## Upgrade and uninstall
 
 Stop the supervisor before upgrading, then use `scoop update agent-manager`,
-`brew upgrade agent-manager`, or rerun the standalone installer. Start the new
-supervisor and UI together. Existing image profiles and Sessions retain their
-resolved configuration; an application upgrade does not silently retag them.
+`brew upgrade agent-manager`, or rerun the standalone installer. For a managed
+login service, rerun `agent-manager install` afterward to record the new executable
+path and restart it. Existing image profiles and Sessions retain their resolved
+configuration; an application upgrade does not silently retag them.
 
-Use your package manager's uninstall command, or remove the standalone executable
+Remove the managed registration before uninstalling the application. Then use
+your package manager's uninstall command, or remove the standalone executable
 (Windows) / symlink and its `.agent-manager-versions` directory (Unix). Remove the
 standalone PATH entry if no longer needed. Application removal intentionally
 retains manager state, runtime caches and guest disks. Delete Sessions in the UI

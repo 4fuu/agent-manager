@@ -87,6 +87,48 @@ passed the [release workflow](https://github.com/4fuu/agent-manager/actions/runs
 ARM64 image smoke tests run in containers, not microVMs. macOS and Linux ARM64
 hardware guest boot and authenticated Agent workflows remain unverified.
 
+## Managed login service checks (source/unreleased, 2026-09-06)
+
+- Native Windows x64 Task Scheduler and WSL2 Linux x64 `systemd --user` passed
+  install/start/stop/status/uninstall, repeat operations, IPC readiness, clean
+  shutdown, state retention and reinstall. Executable and state paths included
+  Chinese characters, spaces, quotes, `&`, `$` and `%`.
+- The published URI image booted under both managed supervisors and cloned the
+  public `octocat/Hello-World` fixture. Guest runtime ID and kernel boot ID remained
+  unchanged across service reinstall, stop/start and uninstall. Temporary guests
+  and native registrations were removed after each check. These checks do not
+  establish authenticated Agent compatibility.
+- Windows tests ran at medium integrity without elevation. Direct task-child VM
+  creation failed; the same-user WMI worker path passed real WHP guest checks.
+- Unit tests cover all three platform definitions and lifecycle routing, command
+  quoting, native-operation errors, registration retention on failure, concurrent
+  operation rejection, shutdown lock release and status credential filtering.
+  The service package also cross-compiles for macOS ARM64.
+- CI now includes the native synthetic-guest lifecycle check on all four build
+  targets. That new CI step has not yet run remotely. macOS LaunchAgent execution,
+  actual logout/login triggers and machine reboot behavior remain unverified;
+  definition tests and cross-compilation do not replace those checks.
+
+To exercise native registration with a synthetic supervisor (no VM required):
+
+```powershell
+$env:AGENT_MANAGER_SERVICE_TEST = '1'
+go test -v ./cmd/agent-manager -run TestNativeLoginServiceLifecycle -count=1 -timeout 6m
+Remove-Item Env:AGENT_MANAGER_SERVICE_TEST
+```
+
+On Linux/macOS, prefix the same `go test` command with
+`AGENT_MANAGER_SERVICE_TEST=1`. The test creates a temporary native registration,
+checks a failed supervisor startup and recovery, then removes the registration.
+Run as the intended desktop user, with Task Scheduler/WMI, a systemd user bus or
+a macOS GUI login session available, respectively.
+
+For real guest lifetime coverage, additionally set
+`AGENT_MANAGER_SERVICE_LIVE_IMAGE=ghcr.io/4fuu/agent-manager/uri:2026.906.0` and use
+an eight-minute test timeout. This uses the real installed runtime and image
+cache, clones a public fixture and deletes only its temporary guest. Leave
+`MSB_HOME` pointing at the runtime installation you intend to test.
+
 ## Current opt-in checks
 
 The checks below are destructive only to uniquely named test guests, but download

@@ -80,8 +80,16 @@ func TestIPCOwnershipAndClientReconnect(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	cancel2()
+	if err := probe.Probe(context.Background()); err != nil {
+		t.Fatal("health probe failed", err)
+	}
+	if err := probe.Shutdown(context.Background()); err != nil {
+		t.Fatal("graceful IPC shutdown failed", err)
+	}
 	if err := <-done; err != nil {
 		t.Fatal(err)
+	}
+	if err := probe.Probe(context.Background()); err == nil {
+		t.Fatal("stopped supervisor reported healthy")
 	}
 }

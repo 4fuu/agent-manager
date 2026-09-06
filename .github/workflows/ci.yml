@@ -38,6 +38,16 @@ jobs:
           go test -race ./...
           go vet ./...
           go build ./cmd/agent-manager
+      - name: Native user-service lifecycle (synthetic guests)
+        env:
+          AGENT_MANAGER_SERVICE_TEST: '1'
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo systemctl start "user@$(id -u).service"
+            export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+            export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          fi
+          go test -v ./cmd/agent-manager -run TestNativeLoginServiceLifecycle -count=1 -timeout 6m
       - name: Installer and release tests
         run: python -m unittest discover -s script -p 'test_*.py' -v
 

@@ -126,6 +126,24 @@ Defaults are `%LOCALAPPDATA%\agent-manager` on Windows and
 supervisor must use the same `--state`; microsandbox data remains under `$MSB_HOME`
 or its default. Do not hand-edit live state.
 
+The managed `install`, `start`, `stop`, `status`, and `uninstall` commands are
+available in v2026.906.1 and later. `install` creates a
+current-user login registration and starts the supervisor; thereafter, launch
+`agent-manager` normally to connect. Use the same `--state` for every service call
+and UI invocation because registrations are keyed by canonical state path.
+
+`stop` detaches existing guests while retaining their disks and leaves login
+autostart enabled. `uninstall` removes only the registration, retaining all state,
+caches and guest disks. `status` distinguishes registration, native service state
+and private IPC readiness, and prints the lifecycle log path. The lifecycle log is
+overwritten at each start and does not contain guest terminal logs. For the full
+platform, upgrade and environment contract, see
+[managed login service](installation.md#managed-login-service).
+
+`serve` continues to run a foreground supervisor. Do not run it against state
+already owned by a managed service. The legacy `contrib/agent-manager.service` is
+a manual unit; stop and disable it before installing the managed service.
+
 ## Windows
 
 Windows support is native and requires WHP; WSL is not a fallback. If `doctor`

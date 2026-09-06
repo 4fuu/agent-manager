@@ -180,6 +180,8 @@ func (s *Supervisor) Handler() http.Handler {
 // Serve holds an OS lock for its lifetime. Closing the handle releases the lock
 // even after a crash; closing a TUI never closes this server.
 func Serve(ctx context.Context, dir string, newSupervisor func() (*Supervisor, error)) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	if e := privatefs.EnsureDir(dir); e != nil {
 		return e
 	}
@@ -201,19 +203,37 @@ func Serve(ctx context.Context, dir string, newSupervisor func() (*Supervisor, e
 		return e
 	}
 	defer s.Close()
-	server := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
+	rpc := s.Handler()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/health":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == "POST" && r.URL.Path == "/shutdown":
+			w.WriteHeader(http.StatusNoContent)
+			cancel()
+		default:
+			rpc.ServeHTTP(w, r)
+		}
+	})
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
 	defer server.Close()
 	done := make(chan struct{})
 	defer close(done)
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		select {
 		case <-ctx.Done():
-			_ = server.Close()
+			shutdownCtx, stop := context.WithTimeout(context.Background(), 5*time.Second)
+			defer stop()
+			_ = server.Shutdown(shutdownCtx)
 		case <-done:
 		}
 	}()
 	e = server.Serve(ln)
 	if errors.Is(e, http.ErrServerClosed) {
+		// Let the shutdown response reach the caller before closing connections.
+		<-shutdownDone
 		return nil
 	}
 	return e
@@ -227,6 +247,27 @@ func NewClient(dir string) *Client {
 	}}
 	return &Client{http: &http.Client{Transport: tr, Timeout: 10 * time.Second}}
 }
+
+// Probe and Shutdown use the same private, user-authenticated IPC as the UI.
+func (c *Client) Probe(ctx context.Context) error    { return c.lifecycle(ctx, "GET", "/health") }
+func (c *Client) Shutdown(ctx context.Context) error { return c.lifecycle(ctx, "POST", "/shutdown") }
+func (c *Client) lifecycle(ctx context.Context, method, path string) error {
+	defer c.http.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(ctx, method, "http://supervisor"+path, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		return errors.New("supervisor rejected lifecycle request")
+	}
+	return nil
+}
+
 func (c *Client) Call(req Request) (Reply, error) {
 	b, e := json.Marshal(req)
 	if e != nil {
@@ -234,7 +275,7 @@ func (c *Client) Call(req Request) (Reply, error) {
 	}
 	r, e := c.http.Post("http://supervisor/rpc", "application/json", bytes.NewReader(b))
 	if e != nil {
-		return Reply{}, errors.New("supervisor unavailable; start agent-manager serve in a separate service")
+		return Reply{}, errors.New("supervisor unavailable; run agent-manager install (first use) or agent-manager start with the same --state; serve runs in the foreground")
 	}
 	defer r.Body.Close()
 	if r.StatusCode != 200 {
