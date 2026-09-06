@@ -1,13 +1,13 @@
 {
-    "version": "2026.906.0",
+    "version": "2026.906.1",
     "description": "Persistent sandbox workspaces for terminal coding agents",
     "homepage": "https://github.com/4fuu/agent-manager",
     "license": "AGPL-3.0-only",
     "notes": "Enable Windows Hypervisor Platform, then run agent-manager runtime-install and agent-manager doctor. Stop the supervisor before updating.",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/4fuu/agent-manager/releases/download/v2026.906.0/agent-manager-2026.906.0-windows-amd64.zip",
-            "hash": "c5798c1de33e21c3ce273e4050d002ee14dff1be1406c75e56cd55f99178301a"
+            "url": "https://github.com/4fuu/agent-manager/releases/download/v2026.906.1/agent-manager-2026.906.1-windows-amd64.zip",
+            "hash": "54c55491ac2aa29cc0437ddc3630f0e25e8e8e8a83843427f107ca962c0f276e"
         }
     },
     "bin": "agent-manager.exe",
