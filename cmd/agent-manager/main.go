@@ -92,6 +92,9 @@ func run() error {
 			return supervisor.Serve(ctx, *dir, func() (*supervisor.Supervisor, error) { return supervisor.New(*dir, b) })
 		}
 		if mode == "service-run" {
+			if err := service.PrepareProcess(); err != nil {
+				return fmt.Errorf("prepare service process: %w", err)
+			}
 			if err := privatefs.EnsureDir(*dir); err != nil {
 				return err
 			}
