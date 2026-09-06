@@ -9,17 +9,20 @@ import (
 
 type terminal struct {
 	*tview.Box
-	frame      supervisor.Frame
-	send       func(supervisor.Input)
-	escape     func()
-	resize     func(int, int)
-	rows, cols int
-	button     uv.MouseButton
+	id, label    string
+	preferred    int
+	pendingWidth int
+	frame        supervisor.Frame
+	send         func(supervisor.Input)
+	escape       func()
+	resize       func(int, int)
+	rows, cols   int
+	button       uv.MouseButton
 }
 
 func newTerminal() *terminal {
 	t := &terminal{Box: tview.NewBox()}
-	t.SetBorder(true).SetTitle(" Agent terminal · click / F5 to focus · Ctrl+] to manager ")
+	t.SetBackgroundColor(tcell.ColorDefault).SetBorder(true).SetTitle(" Terminal ")
 	return t
 }
 func (t *terminal) Draw(s tcell.Screen) {

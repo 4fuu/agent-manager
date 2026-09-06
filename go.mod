@@ -3,6 +3,7 @@ module github.com/4fuu/agent-manager
 go 1.25.1
 
 require (
+	github.com/Microsoft/go-winio v0.6.2
 	github.com/charmbracelet/ultraviolet v0.0.0-20260303162955-0b88c25f3fff
 	github.com/charmbracelet/x/vt v0.0.0-20260902165432-6f6ad8b37b0a
 	github.com/gdamore/tcell/v2 v2.8.1

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 
 	"github.com/4fuu/agent-manager/internal/backend"
@@ -29,13 +30,9 @@ func run() error {
 		mode = args[0]
 		args = args[1:]
 	}
-	home, e := os.UserHomeDir()
+	base, e := defaultStateBase()
 	if e != nil {
 		return e
-	}
-	base := os.Getenv("XDG_STATE_HOME")
-	if base == "" {
-		base = filepath.Join(home, ".local", "state")
 	}
 	fs := flag.NewFlagSet("agent-manager "+mode, flag.ContinueOnError)
 	dir := fs.String("state", filepath.Join(base, "agent-manager"), "private supervisor state directory")
@@ -59,10 +56,16 @@ func run() error {
 		}
 		return supervisor.Serve(ctx, *dir, func() (*supervisor.Supervisor, error) { return supervisor.New(*dir, b) })
 	case "doctor":
+		fmt.Printf("Host: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 		if e := backend.RuntimeCheck(); e != nil {
-			return e
+			return fmt.Errorf("runtime prerequisite: %w", e)
 		}
-		fmt.Println("KVM access available; live image boot is still required to verify runtime.")
+		fmt.Println("Runtime prerequisite: available")
+		if !ms.IsInstalled() {
+			return fmt.Errorf("microsandbox runtime %s is not installed; run agent-manager runtime-install", ms.SDKVersion())
+		}
+		fmt.Printf("Microsandbox runtime: installed (version %s)\n", ms.SDKVersion())
+		fmt.Println("Prerequisites and installed files are available; an actual VM boot is still required to verify the runtime.")
 		return nil
 	case "runtime-install":
 		return ms.EnsureInstalled(ctx)
@@ -78,4 +81,19 @@ func run() error {
 	default:
 		return fmt.Errorf("usage: agent-manager [ui|serve|doctor|runtime-install|image-load] [--state DIR]; serve accepts --fake")
 	}
+}
+
+func defaultStateBase() (string, error) {
+	if runtime.GOOS == "windows" {
+		// Runtime identities are machine-local, not roaming profile settings.
+		return os.UserCacheDir()
+	}
+	if base := os.Getenv("XDG_STATE_HOME"); base != "" {
+		return base, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".local", "state"), nil
 }

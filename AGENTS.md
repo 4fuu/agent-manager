@@ -12,7 +12,10 @@ Project forms, failed setup logs, and terminal focus/resize states.
 State JSON is versioned and atomically replaced. The supervisor directory and
 socket are private to the user. Preserve runtime identities; never recreate a
 missing known instance automatically. Stop retains the disk; delete removes it.
-Config mappings are individual files, read-only by default. Do not log credentials
-or introduce home-directory mounts. Guest terminal content is not persisted as logs.
+Config mappings may be explicit files or directories, read-only by default with
+opt-in writes. Credentials and executable config hooks are trusted guest inputs;
+do not suppress setup or its logs merely because a mapped directory holds secrets.
+Never add implicit home-directory mounts or deliberately log credentials. Guest
+terminal content is not persisted as logs.
 
 See `docs/runtime.md` for upstream contracts and unverified runtime boundaries.

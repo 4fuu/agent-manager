@@ -5,8 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
-	"runtime"
 	"sync"
 	"time"
 
@@ -16,16 +14,6 @@ import (
 
 type Microsandbox struct{}
 
-func RuntimeCheck() error {
-	if runtime.GOOS == "linux" {
-		f, e := os.OpenFile("/dev/kvm", os.O_RDWR, 0)
-		if e != nil {
-			return errors.New("microsandbox requires accessible /dev/kvm on Linux; no host execution fallback")
-		}
-		f.Close()
-	}
-	return nil
-}
 func (Microsandbox) Create(ctx context.Context, name string, p manager.Project) (VM, error) {
 	if err := manager.ValidateProject(p); err != nil {
 		return nil, err
@@ -33,14 +21,21 @@ func (Microsandbox) Create(ctx context.Context, name string, p manager.Project) 
 	if err := RuntimeCheck(); err != nil {
 		return nil, err
 	}
+	if p.Archive != "" {
+		tag := "agent-manager-import:" + name
+		if _, err := ms.Image.Load(ctx, p.Archive, tag); err != nil {
+			return nil, fmt.Errorf("load image archive: %w", err)
+		}
+		p.Image = tag
+	}
 	mounts := map[string]ms.MountConfig{}
 	for _, m := range p.Mappings {
-		mounts[m.Guest] = ms.Mount.Bind(m.Host, ms.MountOptions{Readonly: !m.Writable, Noexec: true, Nosuid: true, Nodev: true})
+		mounts[m.Guest] = ms.Mount.Bind(m.Host, ms.MountOptions{Readonly: !m.Writable, Nosuid: true, Nodev: true})
 	}
 	if p.AuthFile != "" {
 		mounts["/run/manager/github-token"] = ms.Mount.Bind(p.AuthFile, ms.MountOptions{Readonly: true, Noexec: true, Nosuid: true, Nodev: true})
 	}
-	sb, err := ms.CreateSandbox(ctx, name, ms.WithImage(p.Image), ms.WithDetached(), ms.WithRootDisk(ms.RootDisk.Managed(16384)), ms.WithMemory(4096), ms.WithCPUs(2), ms.WithMounts(mounts), ms.WithEnv(map[string]string{"TERM": "xterm-256color", "URI_AGENT_CONFIG_DIR": "/root/.config/uri-agent"}))
+	sb, err := ms.CreateSandbox(ctx, name, ms.WithImage(p.Image), ms.WithDetached(), ms.WithRootDisk(ms.RootDisk.Managed(16384)), ms.WithMemory(4096), ms.WithCPUs(2), ms.WithMounts(mounts), ms.WithEnv(p.Environment))
 	if err != nil {
 		return nil, err
 	}

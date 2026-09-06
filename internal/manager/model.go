@@ -4,15 +4,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+
+	"github.com/4fuu/agent-manager/internal/privatefs"
 )
 
 // Built and imported locally using images/Containerfile; no unpublished registry default.
 const DefaultImage = "uri-agent-manager:2026.904.3"
+
+const StateVersion = 3
 
 type Mapping struct {
 	Host     string
@@ -24,14 +29,36 @@ type Project struct {
 	Name     string
 	URL      string
 	Image    string
+	Archive  string
 	Ref      string
 	Command  string
 	Mappings []Mapping
+	// Preset supplies defaults only; instances retain the resolved configuration.
+	Preset string
+	// Environment is passed to guest setup and terminals and stored in private state.
+	Environment map[string]string
 	// AuthFile is an explicit, dedicated GitHub token file, never a token value.
 	AuthFile string
 }
+type ImageProfile struct {
+	ID          string
+	Name        string
+	Image       string
+	Archive     string
+	Command     string
+	Mappings    []Mapping
+	Environment map[string]string
+}
+type Pane struct {
+	ID      string
+	Command string
+	Width   int
+}
 type Instance struct {
 	ID        string
+	Name      string
+	Title     string
+	Panes     []Pane
 	ProjectID string
 	Config    Project
 	Status    string
@@ -42,9 +69,29 @@ type Instance struct {
 }
 type State struct {
 	Version   int
+	Images    []ImageProfile
 	Projects  []Project
 	Defaults  []Mapping
 	Instances []Instance
+}
+
+var builtinImages = []ImageProfile{
+	{ID: "uri", Name: "URI Agent", Image: DefaultImage, Command: "uri-agent", Environment: map[string]string{"URI_AGENT_CONFIG_DIR": "/root/.config/uri-agent"}},
+	{ID: "pi", Name: "Pi", Image: "uri-agent-manager-pi:local", Command: "pi"},
+	{ID: "omp", Name: "Oh My Pi", Image: "uri-agent-manager-omp:local", Command: "omp"},
+	{ID: "claude", Name: "Claude Code", Image: "uri-agent-manager-claude:local", Command: "claude"},
+	{ID: "codex", Name: "Codex", Image: "uri-agent-manager-codex:local", Command: "codex"},
+}
+
+// BuiltinImages returns independent profiles for images built from images/Containerfile.
+func BuiltinImages() []ImageProfile {
+	out := make([]ImageProfile, len(builtinImages))
+	for i, image := range builtinImages {
+		out[i] = image
+		out[i].Mappings = append([]Mapping(nil), image.Mappings...)
+		out[i].Environment = maps.Clone(image.Environment)
+	}
+	return out
 }
 
 func MergeMappings(global, project []Mapping) []Mapping {
@@ -67,9 +114,8 @@ func MergeMappings(global, project []Mapping) []Mapping {
 
 func ValidateMappings(ms []Mapping) error {
 	seen := map[string]bool{}
-	home, _ := os.UserHomeDir()
 	for _, m := range ms {
-		if !filepath.IsAbs(m.Host) || !path.IsAbs(m.Guest) || path.Clean(m.Guest) != m.Guest {
+		if !filepath.IsAbs(m.Host) || !path.IsAbs(m.Guest) || path.Clean(m.Guest) != m.Guest || strings.ContainsAny(m.Guest, "\\\x00\r\n") {
 			return errors.New("mappings require clean absolute host and guest paths")
 		}
 		resolved, err := filepath.EvalSymlinks(m.Host)
@@ -80,20 +126,48 @@ func ValidateMappings(ms []Mapping) error {
 		if err != nil {
 			return err
 		}
-		if !st.Mode().IsRegular() || resolved == home {
-			return errors.New("map individual regular config files, not directories or devices")
+		if !st.Mode().IsRegular() && !st.IsDir() {
+			return errors.New("mapping source must be a regular file or directory")
 		}
-		if m.Guest == "/" || strings.HasPrefix(m.Guest, "/workspace/") || m.Guest == "/workspace" || strings.HasPrefix(m.Guest, "/run/manager/") {
+		if m.Guest == "/" || strings.HasPrefix(m.Guest, "/workspace/") || m.Guest == "/workspace" || m.Guest == "/run" || m.Guest == "/run/manager" || strings.HasPrefix(m.Guest, "/run/manager/") {
 			return errors.New("mapping target conflicts with workspace or manager state")
 		}
-		if seen[m.Guest] {
-			return errors.New("duplicate guest mapping")
+		for guest := range seen {
+			if guest == m.Guest || strings.HasPrefix(guest, m.Guest+"/") || strings.HasPrefix(m.Guest, guest+"/") {
+				return errors.New("overlapping guest mappings are ambiguous")
+			}
 		}
 		seen[m.Guest] = true
 	}
 	return nil
 }
-func ValidateProject(p Project) error {
+
+func ValidateImage(image ImageProfile) error {
+	if strings.TrimSpace(image.ID) == "" || strings.TrimSpace(image.Name) == "" || strings.TrimSpace(image.Command) == "" {
+		return errors.New("image ID, name and launch command are required")
+	}
+	if (strings.TrimSpace(image.Image) == "") == (strings.TrimSpace(image.Archive) == "") {
+		return errors.New("image requires exactly one OCI reference or archive")
+	}
+	if image.Archive != "" {
+		if !filepath.IsAbs(image.Archive) {
+			return errors.New("image archive must be absolute")
+		}
+		st, err := os.Stat(image.Archive)
+		if err != nil || !st.Mode().IsRegular() {
+			return errors.New("image archive must be an available regular file")
+		}
+	}
+	if err := validateEnvironment(image.Environment); err != nil {
+		return err
+	}
+	return ValidateMappings(image.Mappings)
+}
+
+func ValidateRepository(p Project) error {
+	if strings.TrimSpace(p.Name) == "" {
+		return errors.New("project name is required")
+	}
 	u, err := url.Parse(p.URL)
 	if err != nil || u.Scheme != "https" || u.Host != "github.com" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("repository must be https://github.com/owner/repo without credentials")
@@ -102,32 +176,63 @@ func ValidateProject(p Project) error {
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return errors.New("repository must identify an owner and repository")
 	}
-	if strings.TrimSpace(p.Name) == "" || strings.TrimSpace(p.Image) == "" || strings.TrimSpace(p.Command) == "" {
-		return errors.New("name, image and launch command are required")
-	}
-	if strings.HasPrefix(p.Ref, "-") || strings.ContainsAny(p.Ref, "\r\n\x00") {
-		return errors.New("invalid Git ref")
-	}
 	if p.AuthFile != "" {
 		if !filepath.IsAbs(p.AuthFile) {
 			return errors.New("GitHub token file must be absolute")
 		}
 		st, err := os.Stat(p.AuthFile)
-		if err != nil {
-			return errors.New("GitHub token file is unavailable")
+		if err != nil || !st.Mode().IsRegular() {
+			return errors.New("GitHub token file must be an available regular file")
 		}
-		if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 {
-			return errors.New("GitHub token file must be a regular file with mode 0600 or stricter")
+		if err := privatefs.Check(p.AuthFile); err != nil {
+			return fmt.Errorf("GitHub token file is not private: %w", err)
+		}
+	}
+	return nil
+}
+
+func validateEnvironment(environment map[string]string) error {
+	for key, value := range environment {
+		if key == "" || strings.ContainsRune(value, '\x00') {
+			return errors.New("invalid guest environment")
+		}
+		for i, c := range key {
+			if c != '_' && !(c >= 'A' && c <= 'Z') && !(c >= 'a' && c <= 'z') && !(i > 0 && c >= '0' && c <= '9') {
+				return errors.New("invalid guest environment variable name")
+			}
+		}
+	}
+	return nil
+}
+func ValidateProject(p Project) error {
+	if p.Preset != "" && p.Preset != "custom" && p.Preset != "uri" && p.Preset != "pi" && p.Preset != "omp" && p.Preset != "claude" && p.Preset != "codex" {
+		return errors.New("unknown Agent preset")
+	}
+	if err := ValidateRepository(p); err != nil {
+		return err
+	}
+	if err := validateEnvironment(p.Environment); err != nil {
+		return err
+	}
+	if strings.TrimSpace(p.Command) == "" || ((strings.TrimSpace(p.Image) == "") == (strings.TrimSpace(p.Archive) == "")) {
+		return errors.New("launch command and exactly one image or archive are required")
+	}
+	if strings.HasPrefix(p.Ref, "-") || strings.ContainsAny(p.Ref, "\r\n\x00") {
+		return errors.New("invalid Git ref")
+	}
+	if p.Archive != "" {
+		if err := ValidateImage(ImageProfile{ID: "project", Name: p.Name, Archive: p.Archive, Command: p.Command}); err != nil {
+			return err
 		}
 	}
 	return ValidateMappings(p.Mappings)
 }
 
 func Load(dir string) (State, error) {
-	s := State{Version: 1}
+	s := State{}
 	b, err := os.ReadFile(filepath.Join(dir, "state.json"))
 	if os.IsNotExist(err) {
-		return s, nil
+		return State{Version: StateVersion, Images: BuiltinImages()}, nil
 	}
 	if err != nil {
 		return s, err
@@ -135,12 +240,18 @@ func Load(dir string) (State, error) {
 	if err = json.Unmarshal(b, &s); err != nil {
 		return s, err
 	}
-	if s.Version != 1 {
-		return s, errors.New("unsupported state version")
+	if s.Version != StateVersion {
+		return s, errors.New("unsupported state version; use a new state directory")
 	}
 	return s, nil
 }
 func Save(dir string, s State) error {
+	if s.Version != StateVersion {
+		return errors.New("unsupported state version")
+	}
+	if err := privatefs.EnsureDir(dir); err != nil {
+		return err
+	}
 	b, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
@@ -150,7 +261,7 @@ func Save(dir string, s State) error {
 		return err
 	}
 	defer os.Remove(f.Name())
-	if err = f.Chmod(0600); err == nil {
+	if err = privatefs.Protect(f.Name()); err == nil {
 		_, err = f.Write(b)
 	}
 	if err == nil {
@@ -163,13 +274,40 @@ func Save(dir string, s State) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	if err = os.Rename(f.Name(), filepath.Join(dir, "state.json")); err != nil {
-		return err
+	return privatefs.Replace(f.Name(), filepath.Join(dir, "state.json"))
+}
+
+// ResolveProject fills only missing values and takes ownership of mutable data.
+func ResolveProject(p Project) (Project, error) {
+	p.Mappings = append([]Mapping(nil), p.Mappings...)
+	env := map[string]string{"TERM": "xterm-256color"}
+	var profile *ImageProfile
+	switch p.Preset {
+	case "", "custom":
+		p.Preset = "custom"
+	default:
+		for i := range builtinImages {
+			if builtinImages[i].ID == p.Preset {
+				profile = &builtinImages[i]
+				break
+			}
+		}
+		if profile == nil {
+			return Project{}, errors.New("unknown Agent preset")
+		}
 	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
+	if profile != nil {
+		if p.Command == "" {
+			p.Command = profile.Command
+		}
+		if p.Image == "" && p.Archive == "" {
+			p.Image = profile.Image
+			p.Archive = profile.Archive
+		}
+		p.Mappings = MergeMappings(profile.Mappings, p.Mappings)
+		maps.Copy(env, profile.Environment)
 	}
-	defer d.Close()
-	return d.Sync()
+	maps.Copy(env, p.Environment)
+	p.Environment = env
+	return p, ValidateProject(p)
 }

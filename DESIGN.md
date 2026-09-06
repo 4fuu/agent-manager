@@ -1,352 +1,99 @@
-# Agent Manager：目标与设计
+# Agent Manager: goals and design
 
-本文定义产品目标、交互契约、运行架构与验收标准，供后续实现使用。
-除“当前基线”一节外，文中的能力均为设计目标，不代表已经实现或验证。
-当前安装与运行说明见 [README](README.md)，已验证边界见
-[运行时文档](docs/runtime.md)和[验证记录](docs/verification.md)。
+This document separates current contracts from product goals. Operational details
+belong in [usage](docs/usage.md), runtime facts in [runtime](docs/runtime.md), and
+evidence in [verification](docs/verification.md).
 
-## 1. 产品目标
+## Product model
 
-Agent Manager 是一个用 Go 实现的、支持键盘和鼠标的跨平台隔离 Agent 工作台。
-用户保存可复用的 Project，从 Project 创建具有独立磁盘与运行身份的实例，
-在实例内使用完整的 URI Agent、Claude Code、Codex 或自定义 Agent。
+- A **Project** is a trusted GitHub repository definition. Creating one creates no
+  guest and stores no branch/ref or Agent choice.
+- A **Session** selects a Project and image profile, snapshots that configuration,
+  clones the repository default branch, runs `.agents/setup`, and starts the Agent.
+- Every Session has an independent durable disk and a niri-like horizontal set of
+  terminal columns. Pane identity and width are durable; focus, reveal and scroll
+  are local UI state.
+- The supervisor, not a TUI, owns state, guests and terminal attachments. UI exit
+  detaches; Stop retains disk; Delete removes disk.
 
-核心体验：
+All repository commands, setup, Agents, shells and Yazi run in the guest through
+`internal/backend`. There is no host-execution or WSL fallback. A known missing
+runtime is never silently recreated. State is versioned and atomically replaced;
+version 3 has no migration path from older formats.
 
-1. 配置一次仓库、Agent 镜像、默认 ref 和配置文件映射，之后重复创建实例。
-2. 管理器在 guest 内 clone 仓库，执行仓库的 `.agents/setup`，再启动 Agent。
-3. 日常操作以原生 Agent 终端为中心，项目管理、setup 日志与恢复操作在外围提供。
-4. 关闭 TUI 只断开界面，supervisor 继续持有实例；Stop 保留磁盘，Delete 才删除磁盘。
-5. Windows、Linux、macOS 是实际运行平台目标，不能用“能编译 TUI”代替运行支持。
-6. 默认跟随用户终端背景，形成简洁、轻量、可长时间工作的界面。
-7. 管理面板与后台进程分离；同时打开多个 TUI 时，它们连接同一个后台，共享同步的数据来源。
+## Interaction
 
-### 不变约束
+The primary hierarchy is Project → Session, with restrained textual status and a
+contextual footer rather than an F1–F12 command bar. `Ctrl+]` transfers terminal
+focus to manager navigation. `t` and `y` add shell and Yazi columns, arrows move
+between columns, `+`/`-` change width, `r` fixes a Session name, `Space` opens its
+menu, `i` manages image profiles and `g` manages shared mappings.
 
-- 所有 Agent、仓库命令、setup 和恢复 Shell 都在 guest 内执行，命令执行由
-  `internal/backend` 封装；运行时失败不得静默退回宿主执行或其他隔离后端。
-- 不挂载宿主 home 或整个工作目录；配置仅通过显式单文件授权提供。
-- 保留已知运行身份；找不到已知实例时报告错误，不自动创建替代实例。
-- 状态 JSON 有版本、原子替换，supervisor 状态与通信端点仅当前用户可访问。
-- guest 终端内容不持久化为管理器日志；setup 日志与终端内容分离。
-- `--fake` 仅是合成测试设施，不证明隔离、镜像或真实 Agent 可用。
+Only the leftmost pane contributes an OSC-derived automatic Session title. Manual
+Name is stable. Mouse hit-testing and forwarded guest events use the same pane
+geometry as rendering. Narrow windows reveal the active horizontal column rather
+than compressing all terminals below useful width. Default cells preserve the
+host terminal background while explicit guest colors remain intact.
 
-## 2. 参考设计与取舍
+Setup progress and failure logs remain available beside recovery actions. Terminal
+contents are not manager logs. Forms and all primary actions must remain usable by
+keyboard and mouse across focus changes and resize.
 
-| 参考 | 采用的方向 | 不直接照搬的部分 |
-| --- | --- | --- |
-| [YoanWai/agent-manager](https://github.com/YoanWai/agent-manager) | 克制的会话列表、终端预览、终端优先布局 | 宿主 tmux/CLI 生命周期；其普通列表鼠标导航不完整 |
-| [Herdr](https://github.com/herdrdev/herdr) | 工作区侧栏、自适应布局、键鼠一等交互、焦点管理、跟随终端背景 | 本地进程管理架构和整套多路复用器功能 |
+## Images, mappings and trust
 
-保持“Project / 实例树 + 当前实例终端”的主模型。多窗格分屏、标签拖放排序和
-远程管理不属于首轮完成标准，不应阻塞完整的单实例工作流。
-先在现有 tview/tcell 与 Charm VT 基础上实现目标；框架替换须有实际能力缺口依据。
+Image profiles own Agent command, environment and mappings. Built-ins correspond
+to local URI, Pi, OMP, Claude and Codex `Containerfile` targets; custom profiles
+accept an OCI reference or archive path, with archives loaded via SDK `Image.Load`.
+There are no claimed published images or bundled OCI builder.
 
-## 3. 信息模型与配置
+Mappings are explicit files or directories, read-only by default. Nothing is
+implicitly mounted. Guest targets may not collide with `/workspace` or manager
+paths, and overlapping targets are rejected. Home-directory sources are permitted;
+mapped config hooks retain normal executable behavior. Trusted setup and Agent code
+can read mapped credentials. Known values from individual files are redacted from
+setup logs, but directories are not recursively scanned and emitted credentials
+may remain in logs.
 
-### Project
+## Architecture and platform goals
 
-Project 是可复用配置，包含名称、无凭据的 HTTPS GitHub 仓库 URL、默认 ref、
-Agent 预设或自定义选择、OCI 镜像引用、guest 启动命令、显式环境配置、
-Git 认证文件引用及配置文件映射。
-
-- 空 ref 使用仓库默认分支；允许为新实例覆盖 ref 和镜像。
-- 普通环境配置可以保存，秘密不能直接写入 Project JSON、启动命令或镜像引用。
-- 全局映射按 guest 目标路径合并，Project 同路径配置覆盖全局配置。
-- 编辑 Project 或全局默认值仅影响新实例，不修改已有实例的磁盘、挂载或命令。
-
-### Agent 预设
-
-首批提供 URI Agent、Claude Code、Codex 与自定义入口。预设是 Project 的默认值来源，
-不是新的实例管理系统；终端传输和生命周期保持通用。
-
-预设定义镜像及支持架构、启动命令、可选会话恢复命令、必要的非秘密环境配置、
-认证说明与映射建议。预设不能自动读取宿主凭据或隐式授予挂载权限。
-URI 专用的环境变量和路径应归属 URI 预设，不应出现在通用 backend 默认值中。
-
-自定义入口允许使用满足 guest 契约的其他 OCI 镜像与命令；不要求在宿主安装 Agent。
-没有经过验证的恢复、认证或终端能力应明确标识，不能仅因存在 CLI 就声明支持。
-
-### Instance
-
-实例保存稳定的实例 ID、runtime ID、Project 关联，以及创建时解析后的配置快照。
-快照包括预设解析结果、镜像引用、ref、命令和合并后的映射；能获取时记录镜像 digest
-与实际架构，避免浮动标签造成来源不明。
-
-已建实例使用原磁盘恢复。修改预设、更新镜像标签或升级管理器不能悄悄重建实例。
-Agent 历史和登录状态保存在该实例的 guest 磁盘中，与宿主配置映射分开。
-
-## 4. TUI 视觉与布局
-
-### 主界面
-
-终端占据主要空间。移除常驻两排 F1–F12 按钮的视觉结构，将操作放到其作用对象附近。
-
-```diagram
-┌──────────────────┬────────────────────────────────────┐
-│ Projects      ＋ │ my-project / claude-01     Running │
-│                  ├────────────────────────────────────┤
-│ ▾ my-project     │ Terminal   Setup logs   Details    │
-│   ● claude-01    │                                    │
-│   ● uri-02       │                                    │
-│   ○ codex-03     │          原生 Agent 终端           │
-│                  │                                    │
-│ ▸ another-repo   │                                    │
-├──────────────────┴────────────────────────────────────┤
-│ Terminal focused · Ctrl+] 返回管理             ⋯ 操作 │
-└───────────────────────────────────────────────────────┘
+```text
+Go TUI clients → private same-user IPC → supervisor → internal/backend
+                                                   → native microVM → Linux guest
 ```
 
-- 侧栏展示 Project、实例名称和简短状态；状态必须有文字或符号，不能只靠颜色。
-- 实例标题展示当前 Project、实例、Agent 与运行状态，长内容截断后可在 Details 查看。
-- 主区提供 Terminal、Setup logs、Details；实例创建期间展示进度与日志，成功后展示终端。
-- 新建 Project、新建实例、Start/Attach 等常用动作就近呈现；低频操作进入菜单。
-- setup 失败时突出 Retry setup、Shell 和错误日志；Delete 始终需要确认。
-- 底栏只展示当前焦点、必要快捷键和简短状态，不能覆盖终端输入区。
-- 空列表应提供创建 Project 的入口；未启动、断开、失败、停止等状态均有明确说明。
+Native Windows is mandatory, with WHP as the tested x64 baseline; WSL cannot stand
+in for Windows support. Linux/KVM and macOS Apple Silicon remain platform goals,
+not claims established by the Windows result. CGO/FFI packaging, runtime install,
+path semantics, permissions, terminal behavior and image architecture require
+platform-specific verification.
 
-### 响应式布局
+The image/Agent matrix must separately verify build/import, public and private
+clone, setup, login, input/mouse/resize, detach/reconnect, stop/resume and deletion.
+Build success or fake coverage is not end-to-end Agent support.
 
-- 宽屏：完整侧栏与终端并排，分隔线可直接拖动，记住用户宽度偏好。
-- 中等宽度：侧栏可收起为窄导航栏，为终端让出空间。
-- 窄屏：顶部紧凑导航与全宽终端，Project/实例选择以覆盖面板呈现。
-- 布局断点按终端单元格和控件最小可用宽度确定，不按像素推算。
-- 小尺寸下表单可滚动，保存、取消和校验错误可达；不能依赖固定 100×35 才能操作。
+## Reference direction
 
-### Project 表单
+These repositories are interaction inspiration, not source ports:
 
-按任务分组：基本信息（名称、仓库、ref）、Agent（预设、镜像、命令）、
-高级配置（环境、认证文件、映射）。选择预设后填入可检查的默认值，自定义仍可编辑。
-映射按行编辑宿主文件、guest 路径、只读/可写权限，不依赖易与路径冲突的文本分隔符。
-错误靠近字段显示，保留已输入内容；全程支持键盘和鼠标。
+- `YoanWai/agent-manager`: `internal/ui/view.go`, `styles.go` and `split.go` inform
+  Project hierarchy, restrained statuses and contextual footer behavior.
+- `herdrdev/herdr`: `src/client/shell/sidebar.rs`, `tabs.rs`, `mouse.rs`,
+  `render.rs` and `theme.rs` inform default-background rendering, tabs/columns,
+  hit routing and active-pane scroll reveal.
 
-### 背景与主题
+Agent Manager keeps its Go/tview/Charm VT implementation, guest tmux continuity
+and persistent microVM ownership rather than porting either architecture.
 
-默认使用“跟随终端背景”：外围页面、侧栏、终端空白和布局填充使用终端默认背景色。
-提供浅色、深色可读的前景与强调色，以及用户显式选择的实色背景主题。
+## Remaining design gaps
 
-这里的“透明”表示不覆盖终端默认背景，不是 TUI cell 的 alpha 透明。
-真正的窗口透明、模糊或背景图由 Windows Terminal、WezTerm 等终端设置决定。
-Herdr 的 [terminal 主题](https://github.com/herdrdev/herdr/blob/master/src/app/state.rs#L127-L149)
-使用默认色实现同类效果，并非所有主题默认透明。
+- Explicit single-client terminal input/resize ownership with visible takeover.
+- Revisioned multi-client updates and conflict detection for concurrent edits and
+  lifecycle operations; the supervisor remains authoritative, but polling alone
+  does not prevent stale writes.
+- Complete responsive/form accessibility, terminal selection and abnormal-exit
+  restoration verification in the actual TUI.
+- Real builds, archive loading, private clone, login and compatibility evidence for
+  every built-in image profile and supported platform.
 
-不默认通过 OSC 修改用户终端的全局背景。guest 输出的显式前景、背景和反色必须保留；
-不能为了透明效果删除 Agent 自身的语义着色。选中态和弹窗需要足够对比度，避免背景透出
-影响辨认。保留 guest 默认色与显式颜色的区别，贯穿 VT、supervisor frame 和 UI 渲染链路。
-
-## 5. 键鼠与终端契约
-
-### 焦点
-
-管理区、终端与弹窗具有明确互斥的输入焦点。点击终端进入终端焦点，点击管理控件
-进入相应管理交互。打开弹窗后，输入不能泄漏给 guest；关闭时恢复合理的原焦点。
-切换实例不能把旧实例排队的输入或 resize 误发给新实例。
-
-- 管理区：方向键导航，Tab 切换区域，Enter 执行动作，Esc 关闭菜单或弹窗。
-- 终端：按键、功能键、Ctrl+C、Unicode 输入与粘贴属于 guest；保留 Ctrl+] 返回管理区。
-- Ctrl+Q 在管理焦点退出 UI；终端焦点下不抢占 guest 快捷键。
-- 原有功能键可保留为管理快捷键，但不需要全部常驻屏幕。
-- 必要的快捷键在当前状态可发现，不要求用户背诵。
-
-### 鼠标
-
-所有主要动作都有鼠标入口和键盘等价操作：
-
-- 点击选择实例、展开/折叠 Project、切换视图、打开菜单和填写表单。
-- 滚轮滚动指针所在列表、日志或终端历史；不能静默切换当前实例。
-- 分隔线直接拖动，无需先进入特殊调整模式；拖动越界和松键正确结束。
-- 普通终端模式支持文本选择、复制与历史滚动。
-- guest 请求鼠标报告时，按其协议转发 pane-local 的按下、移动、释放和滚轮事件。
-- 提供明确的修饰键绕过方式进行管理器文本选择，并针对宿主终端拦截行为实测。
-- 鼠标命中区域使用与渲染一致的布局几何，避免 resize 后点击偏移。
-
-### 终端连续性与恢复
-
-正确处理宽字符、中文、组合字符、粘贴、光标、alternate screen 与 resize；
-终端历史查看不能被新输出强行拉回底部，应有返回实时输出入口。
-退出、失焦、断线及异常路径应释放按键/鼠标捕获，并恢复宿主 raw mode、鼠标报告、
-粘贴模式、光标与 alternate screen。不能让用户退出后留下损坏的终端状态。
-
-supervisor 持有终端和实例生命周期，guest tmux 提供 attachment 之外的进程连续性。
-多 UI 可观察同一实例；设计目标是显式的单一输入/resize 控制权，其他客户端的该终端只读，
-并提供接管操作，避免多个窗口竞争尺寸或混合输入。当前的“最后 resize 生效”不作为最终契约。
-
-### 多 TUI 的单一数据来源
-
-TUI 是后台的客户端，不拥有独立的 Project、实例或运行状态数据库。同一用户、同一
-状态目录只允许一个 supervisor 成为权威数据来源；默认启动的所有 TUI 连接同一端点。
-只有用户显式指定不同状态目录时才形成独立管理域，界面应显示连接的管理域以免混淆。
-
-- Project、实例、配置、生命周期状态和日志由 supervisor 统一持有并对外提供。
-  TUI 不直接写状态 JSON，也不各自启动一套实例或后台；并发启动必须避免重复 supervisor。
-- 任一 TUI 提交的创建、编辑、启动、停止或删除操作，都由后台校验并协调执行，
-  结果同步到所有已连接 TUI；不能形成各窗口独立、相互覆盖的数据副本。
-- 客户端首次连接取得完整快照，后续通过带状态修订号的更新或轮询同步；
-  发现更新缺失或重新连接时重新取得快照，旧回复不能覆盖较新的状态。
-- 并发编辑和冲突生命周期操作由后台检测并明确返回冲突或最新状态，不能静默丢失修改。
-- 连接中断时显示断开及数据可能过期，禁止把未确认操作显示为成功；重连后以后台为准。
-- 选中实例、当前视图、滚动位置和面板布局属于各 TUI 的本地视图状态，不强制同步。
-  多个窗口可以查看不同实例，同时看到同一份共享数据的最新状态。
-- 终端输入/resize 控制权按实例单独管理，不限制其他 TUI 提交正常的管理操作。
-  关闭任意或全部 TUI 都不停止后台与 guest；后台存活不依赖首先打开的面板。
-
-## 6. 生命周期与失败处理
-
-正常路径：保存实例意图及身份 → 创建/连接 microVM → guest clone → guest setup → Agent PTY。
-
-- runtime 创建响应丢失时，按持久化的唯一名称核对，不能重复创建。
-- clone 使用 staging 目录，完成后原子移动到工作目录；私库失败保留可理解的错误。
-- 在仓库根目录执行 `.agents/setup`；可执行文件遵循 shebang，否则通过 Bash 执行。
-  没有该文件表示无需 setup，不另造项目工具链配置体系。
-- setup 完成状态在管理器和 guest 中记录；guest 锁防止恢复过程并发执行 setup。
-- setup 失败不得启动 Agent。Shell 进入 guest 恢复环境，不把失败标成成功。
-- Retry setup 是显式操作；Start/Resume 不重复执行已经完成的 setup。
-- UI 退出只 detach。supervisor 重启后连接已知运行实例，不隐式开机所有停止实例。
-- Stop 终止运行并保留磁盘，不等于内存挂起；Resume 从同一磁盘启动。
-- 宿主重启后只能恢复持久磁盘与 Agent 自身保存的会话，不能承诺恢复 RAM 中进程。
-- Delete 确认明确指出磁盘会被删除，保留宿主映射源文件；日志保留策略也要可见。
-- 找不到已知 runtime 时显示不可恢复连接错误及诊断，不自动换新实例。
-
-UI 应区分创建、clone、setup、运行、停止、断开与失败，并给出对应操作；
-错误包含失败阶段和可执行下一步，不以持续旋转的进度提示掩盖失败。
-
-## 7. 跨平台运行架构
-
-```diagram
-┌─────────────────────────────────────────────┐
-│ Go TUI：布局、主题、焦点、键鼠和终端渲染     │
-└──────────────────────┬──────────────────────┘
-                       │ 当前用户私有 IPC
-┌──────────────────────▼──────────────────────┐
-│ Supervisor：状态、生命周期、终端、日志       │
-├─────────────────────────────────────────────┤
-│ internal/backend：microsandbox 与 guest 执行 │
-└──────────────────────┬──────────────────────┘
-                       │ 平台原生虚拟化
-┌──────────────────────▼──────────────────────┐
-│ Linux guest：仓库、.agents/setup、Agent、tmux │
-└─────────────────────────────────────────────┘
-```
-
-### 支持目标与上游条件
-
-| 宿主目标 | microsandbox v0.6.17 路线 | 发布前要求 |
-| --- | --- | --- |
-| Linux x64 / arm64 | KVM，宿主具备可访问的 `/dev/kvm` | 对应架构构建、真实启动、挂载与完整生命周期测试 |
-| macOS Apple Silicon | 上游原生虚拟化路线 | arm64 镜像、权限与终端实机测试 |
-| Windows x64 / arm64 | 原生 Windows Hypervisor Platform，处于上游 preview | WHP 检测、DLL/运行时安装、权限、挂载、终端和恢复实机测试 |
-
-上游依据：[Go SDK 平台矩阵](https://github.com/superradcompany/microsandbox/blob/v0.6.17/sdk/go/README.md)、
-[Windows 条件](https://github.com/superradcompany/microsandbox/blob/v0.6.17/docs/troubleshooting/windows.mdx)、
-[macOS 条件](https://github.com/superradcompany/microsandbox/blob/v0.6.17/docs/troubleshooting/macos.mdx)。
-这些是上游能力，不是本项目的验收结果。Intel macOS 不纳入当前本地运行目标。
-WSL2 可作为另行验证的 Linux 环境，但不能替代原生 Windows 支持承诺，也不能假设其 KVM 可用。
-
-### 平台适配边界
-
-- IPC 与互斥锁：Unix 平台使用私有 socket/文件锁；Windows 使用当前用户受限的
-  named pipe 和相应锁机制，或经过安全验证的等价私有 IPC。不得直接开放无认证 TCP。
-- 权限：Unix mode 与 Windows ACL 分别实现；不能把 `0600` 检查当成 Windows 凭据保护。
-- 路径：宿主路径按宿主系统解析，guest 始终是 Linux POSIX 路径；覆盖盘符、空格、
-  中文、链接解析与非法挂载目标，不能用简单反斜杠替换作为路径转换。
-- 持久化：各平台验证同目录临时文件、替换、同步与恢复语义；迁移保留旧数据和身份。
-- 运行分发：Go SDK 依赖 CGO、原生 FFI 和配套运行时，构建成功不代表动态依赖齐全。
-- supervisor 启停与后台存活按平台实现；Linux systemd 不能作为其他平台安装方式。
-- Windows 控制台 VT 输入、快捷键、中文/IME、粘贴、鼠标与 resize 独立验收；
-  guest PTY 在虚拟机内，不能为兼容而改成宿主 Agent 进程。
-
-`doctor` 应报告平台/架构、虚拟化前提、运行时版本、镜像可用性与权限问题，
-并给出平台对应修复建议。缺少能力时明确阻止启动，不能伪装成成功或自动降级隔离。
-
-## 8. 镜像与认证契约
-
-所有 Agent 镜像共享最小 guest 契约：Linux、受支持架构、Git、Bash、tmux、flock，
-可写工作目录及管理器需要的辅助工具；私库支持需要可用的安全 askpass 路径。
-Agent CLI 安装在镜像中，项目特定工具链仍交给 `.agents/setup`。
-
-- 提供可复现、版本固定的镜像配方；记录 Agent 版本和可验证的来源。
-- 预设不能指向不存在的公开镜像；本地构建标签明确要求 build/import。
-- 镜像构建/导入与实例运行是不同能力；宿主 OCI builder 不改变 microVM 隔离后端。
-- 跨平台包含镜像架构匹配，不能假设 amd64 镜像在 arm64 上可直接使用。
-- 私有 registry 认证与 GitHub clone 认证分开；没有安全的 registry 凭据入口时，
-  明确要求本地导入，不把 Git token 复用为拉取凭据。
-
-Claude Code 等预设必须验证首次登录、凭据刷新、终端输入、停止后启动及 Agent 会话恢复。
-只读认证文件适合预置凭据；需要刷新写入或原子替换文件的 Agent 优先在 guest 内登录，
-将认证状态保留在独立 guest 磁盘。显式可写单文件映射不能被描述成一定支持原子重命名。
-涉及浏览器的登录方式应明确 URL/回调如何到达 guest，不能默认宿主 localhost 等于 guest。
-
-## 9. 安全、状态迁移与兼容性
-
-- 映射仅接受用户显式选择的普通文件，默认只读；拒绝目录、设备、工作区及管理器保留路径。
-- 映射内容对 guest 代码可见，包括仓库 setup 与 Agent 工具；界面要提示授权后果。
-- Git token 与其他秘密以受限文件引用提供，不嵌入 URL、命令行、状态 JSON 或日志。
-- setup 日志脱敏覆盖已知秘密，但不承诺识别任意编码/变形；日志不是秘密隔离边界。
-- 不持久化 guest 终端内容；诊断包与错误消息不得泄露配置内容或认证值。
-- 新字段和预设引入需提供状态版本迁移，保持既有实例 ID、runtime ID、配置快照和磁盘关联。
-- 迁移失败不覆盖原状态；未知新版本明确拒绝加载，不猜测其结构。
-- 原有自定义镜像、命令与映射继续可用，不能强制转换成某个内置 Agent。
-
-## 10. 当前基线与缺口
-
-当前仓库已有 Go TUI、Project/实例快照、microsandbox 适配、独立 supervisor、
-guest clone/setup/tmux 流程、失败恢复操作、单文件映射、私库 token 文件入口与 fake 测试。
-当前 UI 也已经启用鼠标、粘贴和终端事件转发，不需要从零建设这些基础能力。
-
-仍需完成：
-
-- 终端优先的新布局、统一主题、默认背景、响应式表单、完整文本选择与鼠标体验。
-- Windows 私有 IPC、锁、ACL、路径、状态替换、运行安装与完整平台验证。
-- 通用 Agent 预设、Claude Code/Codex 镜像与认证/恢复验证；当前配方和默认配置以 URI 为中心。
-- 多客户端输入与尺寸控制权，以及相应异常恢复。
-- 真实 microVM 的端到端验收。现有开发 orb 没有 `/dev/kvm`；fake 测试不能验证
-  真实 boot、OCI 导入、只读挂载、Agent 运行或任一宿主平台的完整支持。
-
-## 11. 实施顺序
-
-1. 固定 Project/预设/实例快照契约与状态迁移；划清平台适配边界。
-2. 打通平台运行骨架，优先识别 Windows WHP、IPC 和文件挂载阻碍；同步准备通用镜像契约。
-3. 实现主布局、主题、Project 表单、失败态和键鼠焦点；保持既有生命周期行为。
-4. 补齐选择/滚动、拖动、终端恢复和多客户端控制权，完成真实 TUI 验证。
-5. 完成 URI、Claude Code、Codex 预设与登录/恢复测试，保留自定义入口。
-6. 按平台与 Agent 组合执行真实验收，更新 README、平台安装说明和已验证能力矩阵。
-
-阶段顺序不缩减最终目标。受运行环境限制的项目标为“未验证”，不能用 fake 结果关闭验收项。
-
-## 12. 完成标准
-
-### 自动化与数据安全
-
-- 执行 `gofmt -w cmd internal`、`go test ./...`、`go test -race ./...`、
-  `go vet ./...`、`go build ./cmd/agent-manager`，覆盖相关平台构建与依赖装载。
-- 验证配置优先级、快照不可变、状态迁移、原子写入、重复 supervisor 拒绝、IPC 私密性。
-- 验证身份响应丢失、已知实例缺失、setup 中止、失败重试、stop/resume 和 delete 边界。
-- 验证输入焦点、旧输入隔离、guest-local 鼠标坐标、粘贴、resize 与多客户端控制权。
-- 同时连接至少两个真实 TUI：在一个窗口创建/编辑 Project、启动/停止/删除实例，
-  另一个无需重开即看到更新；各窗口的选择与布局保持独立。
-- 验证并发修改冲突、断线重连快照、过期回复丢弃，以及关闭全部 TUI 后后台继续运行；
-  再打开 TUI 仍连接原数据源，不新增 supervisor 或重复实例。
-
-### 实际 TUI
-
-- 在真实 TUI 中分别用纯键盘、鼠标完成 Project 创建/编辑、实例启动、切换、停止和删除确认。
-- 检查宽屏、中屏、窄屏及运行中 resize；表单、弹窗、菜单和失败日志没有不可达控件。
-- 检查空状态、setup 进度、setup 失败、Shell/Retry、断开与停止状态。
-- 在浅色/深色、默认背景/实色背景下检查文本对比度、选中态及 guest 显式背景保真。
-- 验证中文、组合字符、粘贴、Ctrl+C、Ctrl+]、文本选择、滚轮及 guest 鼠标应用。
-- 检查退出和异常恢复后的宿主终端状态；保存并检查代表性截图，不能只看布局代码。
-
-### 平台 × Agent 实机验收
-
-每个声明支持的宿主 OS/架构都应记录虚拟化条件、终端程序、SDK/runtime 版本、
-镜像 digest/架构、Agent 版本、测试结果与限制。至少覆盖：
-
-1. 安装与 doctor；真实镜像构建或取得、导入、启动。
-2. 公库/私库 clone，`.agents/setup` 成功、缺失、失败与重试。
-3. 只读单文件无法写入，显式可写行为符合承诺，宿主目录不会被额外暴露。
-4. URI Agent、Claude Code、Codex 的首次可用、认证、输入、鼠标和 resize；自定义镜像流程。
-5. UI 退出重进、supervisor 重启重连、stop/resume、宿主重启后的磁盘/会话恢复。
-6. Delete 删除实例磁盘但不删除宿主源文件；已知实例缺失不会生成新身份。
-
-平台表必须区分“构建通过”“fake 通过”“真实运行通过”和“受上游 preview 限制”。
-只有完成相应实机流程，才能对用户声明该组合受支持。
+These remain completion goals. They must not be silently dropped because the
+current implementation supports the normal single-client path.

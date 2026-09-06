@@ -1,124 +1,110 @@
 # Using Agent Manager
 
-## Manager and terminal controls
+## Projects and Sessions
 
-All primary actions have clickable buttons and keyboard shortcuts:
+A Project contains a name and credential-free `https://github.com/owner/repo` URL.
+Saving it does not create a guest. **New Session** selects a Project and image
+profile, snapshots that configuration, clones the repository's default branch,
+runs `.agents/setup`, then starts the profile command. Later profile or shared
+mapping edits do not alter existing Sessions.
+
+The left tree is Project → Session. The selected Session owns a horizontal set of
+terminal columns. Pane IDs and preferred widths are durable; active pane, reveal
+position and scroll/focus state are local to each UI. The leftmost pane's OSC title
+may name an unnamed Session. A manually assigned **Name** remains fixed.
+
+## Controls
 
 | Key | Action |
 | --- | --- |
-| F1 / F2 | Add / edit the selected Project |
-| F3 | New instance; choose ref and image before launch |
-| F4 | Start / resume / reconnect selected instance |
-| F5 / F6 | Focus terminal / detach terminal focus |
-| F7 | Stop VM, preserving its disk; cancels active setup first |
-| F8 | Retry setup explicitly, then launch URI Agent |
-| F9 | Open a guest recovery shell without marking setup complete |
-| F10 | Delete instance, or selected Project when no instance is selected; confirmation required |
-| F11 | Edit global config-file mappings |
-| F12 | Toggle setup logs and terminal |
-| Tab | Switch tree and right pane; advance fields inside a form |
-| Esc | Cancel a form or confirmation |
-| Ctrl+] | Return from the nested terminal to manager controls |
-| Ctrl+Q | Quit UI while in manager mode |
+| `p` / `n` | New Project / Session |
+| `w` | Project / Session picker, including when the sidebar is hidden |
+| `i` / `g` | Image profiles / shared mappings |
+| `Space` | Context menu |
+| `Tab` | Focus the workspace; `Ctrl+]` returns to manager navigation |
+| Left / Right | Move between terminal columns |
+| `+` / `-` | Increase / decrease the active column width |
+| `t` / `y` | Add a guest shell / Yazi column |
+| `r` | Give the Session a fixed name |
+| `Ctrl+Q` | Quit the UI from manager focus |
 
-Arrow keys select Projects/instances and scroll logs. Click a tree row to select
-it. Click the terminal or Attach to focus it. While terminal-focused, keys,
-function keys and bracketed paste belong to URI Agent; only Ctrl+] is reserved.
-Clicking manager buttons remains possible. Guest mouse events are translated to
-pane-local coordinates and emitted according to the guest's requested modes.
-Terminal rendering and keyboard/mouse protocol encoding use Charm's VT library;
-the manager does not execute or reinterpret the agent's commands.
+Mouse selection, forms, menus and pane hit routing are supported. Guest-requested
+mouse events use pane-local coordinates. Use guest tmux copy mode (`Ctrl+B`, then
+`[`) for terminal scrollback. Setup logs support arrows and wheel scrolling; `l`
+switches between logs and workspace. Terminal output itself is not persisted.
 
-Setup logs are plain text, selectable through your terminal, and scrollable using
-the keyboard or wheel. The UI previews the latest 128 KiB; full redacted logs are
-private files named `<instance-id>.log` in the state directory. Agent terminal
-output is held in memory, not written to those logs. Use guest tmux copy mode
-(Ctrl+B then `[`) for terminal scrollback.
+The Space menu also provides start/reconnect, stop, delete, setup retry, recovery
+shell, close-column and Project editing actions as applicable. Delete requires
+confirmation. Stop preserves the disk.
 
-## Projects and config mappings
+## Image profiles and mappings
 
-A Project stores a name, credential-free HTTPS GitHub URL, image reference,
-default branch/ref, guest shell command, optional GitHub token-file path, and
-per-project mappings. Defaults are `main`, `uri-agent-manager:2026.904.3` and
-`uri-agent`. Arbitrary Git refs are fetched and checked out detached; URI Agent
-can create a working branch in its independent workspace. Empty ref uses the
-repository's default branch.
+Built-in profiles are URI, Pi, OMP, Claude Code and Codex. A custom profile accepts
+exactly one OCI reference or absolute OCI archive path, a command, environment
+JSON and mappings. Archive selection is imported automatically with the SDK's
+`Image.Load`; see [image setup](../images/README.md).
 
-One mapping per line in either the Project or global mapping form:
+Shared and profile mappings use one entry per line:
 
 ```text
-/home/alice/config/settings.json | /root/.config/uri-agent/settings.json | ro
-/home/alice/config/models.json | /root/.config/uri-agent/models.json | ro
+C:\Users\alice\Agent config | /root/.config/uri-agent | ro
+C:\Users\alice\AppData\Roaming\GitHub CLI | /root/.config/gh | ro
+C:\Users\alice\.codex\auth.json | /root/.codex/auth.json | rw
 ```
 
-The final field defaults to `ro`; `rw` must be explicit. Only existing individual
-regular files are accepted. Directories, devices and guest workspace/manager-state
-targets are rejected. Paths are absolute; `~` is not expanded. The `|` character
-is the form delimiter and cannot be represented in its paths.
+The form is `absolute host path | absolute guest path | ro or rw`; `ro` is the
+default. Existing regular files and directories are accepted. No host path is
+mounted implicitly. Guest `/workspace` and `/run/manager` collisions, overlapping
+guest targets, devices and non-absolute paths are rejected. There is no special
+ban on a home-root source and mapped config hooks are executable according to
+normal guest filesystem behavior.
 
-Global defaults are merged by guest path, with Project entries taking precedence.
-An instance snapshots the merged result, image, ref and command when created.
-Editing a Project or its defaults affects only new instances. This prevents a
-running instance from changing its mounts behind the agent's back.
+Shared entries are merged by guest path, with profile entries taking precedence
+at the same path. Put common tools such as `gh` in shared mappings and the Agent's
+configuration in its image profile. The supplied images configure Git to use
+`gh auth git-credential` for GitHub, so a mapped gh configuration can authenticate
+clone as well as later guest Git operations. Host OS credential-vault references
+are not portable credentials; use a config containing a usable token or the
+dedicated token-file option below. Prefer a writable directory when an Agent
+refreshes credentials using atomic file replacement.
 
-URI Agent uses `/root/.config/uri-agent` in the supplied image (`URI_AGENT_CONFIG_DIR`).
-Its `settings.json`, `auth.json` and `models.json` are config files; its other
-session state remains on the instance's private guest disk. Do not map the whole
-config directory or entire home. Read-only `auth.json` works for pre-provisioned
-credentials but prevents credential refresh/writes. A writable bind file may not
-support applications that replace files by atomic rename; authenticate inside
-the guest instead when that behavior is required.
+Projects are trusted. Mapping credentials intentionally makes them available to
+repository setup and Agent code. Directory mappings have no credential scanning
+or suppression: their logs run normally and can contain emitted secrets. Setup
+log redaction recognizes complete lines and JSON string values from individual
+mapped files and the dedicated Git token file. It cannot recognize transformed,
+generated, encoded or recursively discovered values. Treat logs accordingly.
 
 ## Private GitHub repositories
 
-Create a dedicated fine-grained GitHub token with read access to only the target
-repository. Write it into an absolute-path host file using your secret manager
-or editor, then set mode 0600. Put **the file path**, not its contents, in the
-Project's **GitHub token file** field.
+The Project's GitHub token field accepts an absolute path to a dedicated regular
+file, not a token value. The file must be private to the current user and is made
+available read-only at `/run/manager/github-token`; the supplied askpass helper
+uses it for clone. Repository URLs, image references and commands should not embed
+credentials. No host Git configuration, home directory or SSH agent is mounted
+implicitly.
 
-The file is read-only mounted at `/run/manager/github-token`. The supplied image's
-`manager-git-askpass` helper answers Git's credential prompts over a pipe. Clone
-URLs, command arguments, Project JSON and manager logs never contain the token.
-No host Git credentials or home directory are mounted implicitly. Git does not
-persist this token into the cloned repository config. The token file remains
-available in the guest for later explicit use; for Git commands after cloning,
-set `GIT_ASKPASS=/usr/local/bin/manager-git-askpass GIT_TERMINAL_PROMPT=0` in the
-guest. SSH agent forwarding is not implemented.
+## Supervisor and state
 
-Mappings and the token file grant guest code access to their contents. Treat the
-repository's setup script and URI Agent tools as having that authority. Use
-read-only, short-lived, repository-scoped credentials. The manager redacts known
-mapped JSON string values, config lines and the Git token before persisting setup
-logs, including values split across stream chunks. Redaction is not a sandbox
-against malicious scripts: transformed, encoded or newly generated secrets cannot
-be reliably recognized. Do not print secrets in setup scripts. Never put secrets
-in the launch command, image reference or repository URL.
+The UI uses a private Unix socket or same-user Windows named pipe. Exactly one
+supervisor owns a state directory. Multiple UIs can observe it, but explicit
+multi-client terminal ownership and edit-conflict detection are not implemented;
+avoid typing into one Session from multiple clients.
 
-## Supervisor service
+Defaults are `%LOCALAPPDATA%\agent-manager` on Windows and
+`$XDG_STATE_HOME/agent-manager` (or `~/.local/state/agent-manager`) on Unix. UI and
+supervisor must use the same `--state`; microsandbox data remains under `$MSB_HOME`
+or its default. Do not hand-edit live state.
 
-The UI connects over a 0600 Unix socket inside a 0700 state directory. Only one
-supervisor may own that directory; an advisory lock protects startup and stale
-socket removal. Multiple UIs can observe the same instance. They share one PTY;
-the last resize wins, so use a single terminal-focused client when typing.
+## Windows
 
-For Linux desktop use:
+Windows support is native and requires WHP; WSL is not a fallback. If `doctor`
+reports no hypervisor, enable WHP from elevated PowerShell and reboot:
 
-```sh
-install -Dm755 agent-manager "$HOME/.local/bin/agent-manager"
-install -Dm644 contrib/agent-manager.service \
-  "$HOME/.config/systemd/user/agent-manager.service"
-systemctl --user daemon-reload
-systemctl --user enable --now agent-manager
-agent-manager
+```powershell
+Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All -NoRestart
 ```
 
-The supplied service deliberately uses `KillMode=process` so restarting the
-supervisor does not kill detached microVM processes in its cgroup. Stop instances
-explicitly in the UI before intentionally terminating all work. Host logout may
-stop user services unless your system administrator enables lingering.
-
-The default manager directory is `$XDG_STATE_HOME/agent-manager`, otherwise
-`~/.local/state/agent-manager`. Use the same `--state DIR` for UI and supervisor.
-Microsandbox's independent data directory is `$MSB_HOME`, otherwise
-`~/.microsandbox`; both must remain available for recovery. Back up both while
-instances are stopped. Do not hand-edit state while the supervisor is running.
+Run Agent Manager as the normal user. `runtime-install` installs the pinned runtime
+under `%USERPROFILE%\.microsandbox` (or `%MSB_HOME%`). Protected ACLs are applied
+to manager state. Credential files outside it are checked, not re-permissioned.

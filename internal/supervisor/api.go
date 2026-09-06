@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/4fuu/agent-manager/internal/manager"
-	"golang.org/x/sys/unix"
+	"github.com/4fuu/agent-manager/internal/privatefs"
 )
 
 type Cell struct {
@@ -30,6 +30,7 @@ type Frame struct {
 	Cells                           []Cell
 	Logs                            string
 	Live                            bool
+	Title                           string
 }
 
 func rgb(c color.Color) string {
@@ -46,34 +47,45 @@ func rgb(c color.Color) string {
 	return string(out)
 }
 func (s *Supervisor) Frame(id string) (Frame, error) {
+	return s.PaneFrame(id, "")
+}
+func (s *Supervisor) PaneFrame(id, paneID string) (Frame, error) {
 	s.mu.Lock()
-	if s.instance(id) == nil {
+	in := s.instance(id)
+	if in == nil {
 		s.mu.Unlock()
 		return Frame{}, errors.New("instance not found")
 	}
 	l := s.live[id]
+	if paneID == "" && len(in.Panes) > 0 {
+		paneID = in.Panes[0].ID
+	}
 	busy := l != nil && l.busy
 	s.mu.Unlock()
 	f := Frame{}
 	if l != nil && !busy {
 		l.mu.Lock()
 		defer l.mu.Unlock()
-		if t := l.term; t != nil {
-			t.mu.Lock()
-			defer t.mu.Unlock()
-			f.Live = l.process != nil
-			f.Width = t.Width()
-			f.Height = t.Height()
-			pos := t.CursorPosition()
-			f.CursorX = pos.X
-			f.CursorY = pos.Y
-			for y := 0; y < f.Height; y++ {
-				for x := 0; x < f.Width; x++ {
-					cell := Cell{}
-					if c := t.CellAt(x, y); c != nil {
-						cell = Cell{Text: c.Content, FG: rgb(c.Style.Fg), BG: rgb(c.Style.Bg), Attr: c.Style.Attrs, Underline: c.Style.Underline != 0, Width: c.Width}
+		pane := l.panes[paneID]
+		if pane != nil {
+			if t := pane.term; t != nil {
+				t.mu.Lock()
+				defer t.mu.Unlock()
+				f.Title = t.title
+				f.Live = pane.process != nil
+				f.Width = t.Width()
+				f.Height = t.Height()
+				pos := t.CursorPosition()
+				f.CursorX = pos.X
+				f.CursorY = pos.Y
+				for y := 0; y < f.Height; y++ {
+					for x := 0; x < f.Width; x++ {
+						cell := Cell{}
+						if c := t.CellAt(x, y); c != nil {
+							cell = Cell{Text: c.Content, FG: rgb(c.Style.Fg), BG: rgb(c.Style.Bg), Attr: c.Style.Attrs, Underline: c.Style.Underline != 0, Width: c.Width}
+						}
+						f.Cells = append(f.Cells, cell)
 					}
-					f.Cells = append(f.Cells, cell)
 				}
 			}
 		}
@@ -93,10 +105,12 @@ func (s *Supervisor) Frame(id string) (Frame, error) {
 }
 
 type Request struct {
-	Action, ID, Ref, Image string
-	Project                manager.Project
-	Mappings               []manager.Mapping
-	Input                  Input
+	Action, ID, Ref, Image, PaneID, Name, Command string
+	Width                                         int
+	Project                                       manager.Project
+	Profile                                       manager.ImageProfile
+	Mappings                                      []manager.Mapping
+	Input                                         Input
 }
 type Reply struct {
 	Error string
@@ -123,7 +137,7 @@ func (s *Supervisor) Handler() http.Handler {
 		case "state":
 			out.State = s.State()
 		case "frame":
-			out.Frame, e = s.Frame(req.ID)
+			out.Frame, e = s.PaneFrame(req.ID, req.PaneID)
 		case "project":
 			e = s.Project(req.Project)
 		case "defaults":
@@ -131,8 +145,23 @@ func (s *Supervisor) Handler() http.Handler {
 		case "delete-project":
 			e = s.DeleteProject(req.ID)
 		case "create":
-			out.ID, e = s.Create(req.ID, req.Ref, req.Image)
+			out.ID, e = s.CreateProfile(req.ID, req.Image)
+		case "image":
+			e = s.Image(req.Profile)
+		case "delete-image":
+			e = s.DeleteImage(req.ID)
+		case "add-pane":
+			out.ID, e = s.AddPane(req.ID, req.Command)
+		case "close-pane":
+			e = s.ClosePane(req.ID, req.PaneID)
+		case "rename":
+			e = s.Rename(req.ID, req.Name)
+		case "width":
+			e = s.Width(req.ID, req.PaneID, req.Width)
 		case "input":
+			if req.Input.PaneID == "" {
+				req.Input.PaneID = req.PaneID
+			}
 			e = s.Input(req.Input)
 		default:
 			e = s.Action(req.ID, req.Action)
@@ -144,12 +173,10 @@ func (s *Supervisor) Handler() http.Handler {
 	})
 }
 
-// Serve locks the state directory before touching a stale socket. Access is same-user only.
+// Serve holds an OS lock for its lifetime. Closing the handle releases the lock
+// even after a crash; closing a TUI never closes this server.
 func Serve(ctx context.Context, dir string, newSupervisor func() (*Supervisor, error)) error {
-	if e := os.MkdirAll(dir, 0700); e != nil {
-		return e
-	}
-	if e := os.Chmod(dir, 0700); e != nil {
+	if e := privatefs.EnsureDir(dir); e != nil {
 		return e
 	}
 	lock, e := os.OpenFile(filepath.Join(dir, "supervisor.lock"), os.O_CREATE|os.O_RDWR, 0600)
@@ -157,30 +184,30 @@ func Serve(ctx context.Context, dir string, newSupervisor func() (*Supervisor, e
 		return e
 	}
 	defer lock.Close()
-	if e = unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); e != nil {
+	if e = lockFile(lock); e != nil {
 		return errors.New("supervisor already owns this state directory")
 	}
-	defer unix.Flock(int(lock.Fd()), unix.LOCK_UN)
+	ln, e := listen(dir)
+	if e != nil {
+		return e
+	}
+	defer ln.Close()
 	s, e := newSupervisor()
 	if e != nil {
 		return e
 	}
 	defer s.Close()
-	socket := filepath.Join(dir, "supervisor.sock")
-	if e = os.Remove(socket); e != nil && !os.IsNotExist(e) {
-		return e
-	}
-	ln, e := net.Listen("unix", socket)
-	if e != nil {
-		return e
-	}
-	defer os.Remove(socket)
-	defer ln.Close()
-	if e = os.Chmod(socket, 0600); e != nil {
-		return e
-	}
 	server := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second}
-	go func() { <-ctx.Done(); _ = server.Close() }()
+	defer server.Close()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = server.Close()
+		case <-done:
+		}
+	}()
 	e = server.Serve(ln)
 	if errors.Is(e, http.ErrServerClosed) {
 		return nil
@@ -192,7 +219,7 @@ type Client struct{ http *http.Client }
 
 func NewClient(dir string) *Client {
 	tr := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", filepath.Join(dir, "supervisor.sock"))
+		return dial(ctx, dir)
 	}}
 	return &Client{http: &http.Client{Transport: tr, Timeout: 10 * time.Second}}
 }
@@ -201,7 +228,7 @@ func (c *Client) Call(req Request) (Reply, error) {
 	if e != nil {
 		return Reply{}, e
 	}
-	r, e := c.http.Post("http://unix/rpc", "application/json", bytes.NewReader(b))
+	r, e := c.http.Post("http://supervisor/rpc", "application/json", bytes.NewReader(b))
 	if e != nil {
 		return Reply{}, errors.New("supervisor unavailable; start agent-manager serve in a separate service")
 	}

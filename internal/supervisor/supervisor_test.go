@@ -136,8 +136,18 @@ func TestIndependentInstancesAndSnapshot(t *testing.T) {
 	}
 	p := s.State().Projects[0]
 	p.Command = "changed command"
+	p.Environment = map[string]string{"TERM": "vt100"}
 	if e = s.Project(p); e != nil {
 		t.Fatal(e)
+	}
+	p.Environment["TERM"] = "caller mutation"
+	if s.State().Projects[0].Environment["TERM"] != "vt100" {
+		t.Fatal("project retains caller-owned environment")
+	}
+	for _, in := range s.State().Instances {
+		if in.Config.Environment["TERM"] != "xterm-256color" {
+			t.Fatal("project edit mutated existing instance environment")
+		}
 	}
 	first := act(t, s, id, "start", "running")
 	second := act(t, s, id2, "start", "running")

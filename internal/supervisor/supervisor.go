@@ -17,30 +17,35 @@ import (
 
 	"github.com/4fuu/agent-manager/internal/backend"
 	"github.com/4fuu/agent-manager/internal/manager"
+	"github.com/4fuu/agent-manager/internal/privatefs"
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/vt"
 )
 
 type live struct {
-	mu      sync.Mutex
-	vm      backend.VM
+	mu     sync.Mutex
+	vm     backend.VM
+	panes  map[string]*livePane
+	cancel context.CancelFunc
+	busy   bool
+	done   chan struct{}
+}
+
+type livePane struct {
 	process backend.Process
 	term    *screen
-	cancel  context.CancelFunc
-	busy    bool
-	done    chan struct{}
 }
 
 // Caller holds l.mu. Unblock terminal replies before closing the transport.
 func (l *live) detachTerminal() {
-	t, p := l.term, l.process
-	l.term = nil
-	l.process = nil
-	if t != nil {
-		_ = t.Close()
-	}
-	if p != nil {
-		_ = p.Close()
+	for id, pane := range l.panes {
+		if pane.term != nil {
+			_ = pane.term.Close()
+		}
+		if pane.process != nil {
+			_ = pane.process.Close()
+		}
+		delete(l.panes, id)
 	}
 }
 
@@ -49,6 +54,7 @@ type screen struct {
 	*vt.SafeEmulator
 	mu     sync.Mutex
 	closed bool
+	title  string
 }
 
 func (t *screen) Write(b []byte) (int, error) {
@@ -82,10 +88,7 @@ type Supervisor struct {
 }
 
 func New(dir string, b backend.Backend) (*Supervisor, error) {
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return nil, err
-	}
-	if err := os.Chmod(dir, 0700); err != nil {
+	if err := privatefs.EnsureDir(dir); err != nil {
 		return nil, err
 	}
 	st, err := manager.Load(dir)
@@ -130,12 +133,53 @@ func (s *Supervisor) save() error {
 	return err
 }
 func (s *Supervisor) State() manager.State {
+	s.syncTitles()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, _ := json.Marshal(s.state)
 	var out manager.State
 	_ = json.Unmarshal(b, &out)
 	return out
+}
+
+// Polling coalesces OSC updates and preserves their order without spawning a
+// goroutine or writing state for every title sequence received from a guest.
+func (s *Supervisor) syncTitles() {
+	s.mu.Lock()
+	lives := make(map[string]*live, len(s.live))
+	for id, l := range s.live {
+		if !l.busy {
+			lives[id] = l
+		}
+	}
+	s.mu.Unlock()
+	for id, l := range lives {
+		l.mu.Lock()
+		s.mu.Lock()
+		if in := s.instance(id); in != nil && len(in.Panes) > 0 {
+			if p := l.panes[in.Panes[0].ID]; p != nil {
+				p.term.mu.Lock()
+				title := p.term.title
+				p.term.mu.Unlock()
+				if title != in.Title {
+					in.Title = title
+					_ = s.save()
+				}
+			}
+		}
+		s.mu.Unlock()
+		l.mu.Unlock()
+	}
+}
+
+func cleanTitle(s string) string {
+	r := []rune(strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, s))
+	return string(r[:min(len(r), 200)])
 }
 func id() string {
 	var b [12]byte
@@ -145,8 +189,16 @@ func id() string {
 	return hex.EncodeToString(b[:])
 }
 func (s *Supervisor) Project(p manager.Project) error {
-	if err := manager.ValidateProject(p); err != nil {
+	if err := manager.ValidateRepository(p); err != nil {
 		return err
+	}
+	p.Mappings = append([]manager.Mapping(nil), p.Mappings...)
+	if p.Environment != nil {
+		environment := make(map[string]string, len(p.Environment))
+		for key, value := range p.Environment {
+			environment[key] = value
+		}
+		p.Environment = environment
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -168,13 +220,50 @@ func (s *Supervisor) Project(p manager.Project) error {
 	}
 	return s.save()
 }
+
+func (s *Supervisor) Image(profile manager.ImageProfile) error {
+	if profile.ID == "" {
+		profile.ID = id()
+	}
+	if err := manager.ValidateImage(profile); err != nil {
+		return err
+	}
+	profile.Mappings = append([]manager.Mapping(nil), profile.Mappings...)
+	environment := make(map[string]string, len(profile.Environment))
+	for k, v := range profile.Environment {
+		environment[k] = v
+	}
+	profile.Environment = environment
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.state.Images {
+		if s.state.Images[i].ID == profile.ID {
+			s.state.Images[i] = profile
+			return s.save()
+		}
+	}
+	s.state.Images = append(s.state.Images, profile)
+	return s.save()
+}
+
+func (s *Supervisor) DeleteImage(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.state.Images {
+		if s.state.Images[i].ID == id {
+			s.state.Images = append(s.state.Images[:i], s.state.Images[i+1:]...)
+			return s.save()
+		}
+	}
+	return errors.New("image not found")
+}
 func (s *Supervisor) Defaults(ms []manager.Mapping) error {
 	if err := manager.ValidateMappings(ms); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.state.Defaults = ms
+	s.state.Defaults = append([]manager.Mapping(nil), ms...)
 	return s.save()
 }
 func (s *Supervisor) DeleteProject(id string) error {
@@ -203,15 +292,194 @@ func (s *Supervisor) Create(project, ref, image string) (string, error) {
 				p.Image = image
 			}
 			p.Mappings = manager.MergeMappings(s.state.Defaults, p.Mappings)
-			if err := manager.ValidateProject(p); err != nil {
+			p, err := manager.ResolveProject(p)
+			if err != nil {
 				return "", err
 			}
-			in := manager.Instance{ID: id(), ProjectID: p.ID, Config: p, Status: "new"}
+			in := manager.Instance{ID: id(), ProjectID: p.ID, Config: p, Status: "new", Panes: []manager.Pane{{ID: "agent", Command: p.Command, Width: 80}}}
 			s.state.Instances = append(s.state.Instances, in)
 			return in.ID, s.save()
 		}
 	}
 	return "", errors.New("project not found")
+}
+
+// CreateProfile snapshots the selected profile and shared mappings. New UI
+// sessions always clone the repository's default branch.
+func (s *Supervisor) CreateProfile(project, profile string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var p *manager.Project
+	var image *manager.ImageProfile
+	for i := range s.state.Projects {
+		if s.state.Projects[i].ID == project {
+			x := s.state.Projects[i]
+			p = &x
+		}
+	}
+	for i := range s.state.Images {
+		if s.state.Images[i].ID == profile {
+			x := s.state.Images[i]
+			image = &x
+		}
+	}
+	if p == nil {
+		return "", errors.New("project not found")
+	}
+	if image == nil {
+		return "", errors.New("image not found")
+	}
+	config := *p
+	config.Ref = ""
+	config.Preset = "custom"
+	config.Image = image.Image
+	config.Archive = image.Archive
+	config.Command = image.Command
+	config.Mappings = manager.MergeMappings(s.state.Defaults, image.Mappings)
+	config.Environment = make(map[string]string, len(image.Environment)+1)
+	config.Environment["TERM"] = "xterm-256color"
+	for k, v := range image.Environment {
+		config.Environment[k] = v
+	}
+	if err := manager.ValidateImage(*image); err != nil {
+		return "", err
+	}
+	if err := manager.ValidateProject(config); err != nil {
+		return "", err
+	}
+	in := manager.Instance{ID: id(), ProjectID: p.ID, Config: config, Status: "new", Panes: []manager.Pane{{ID: "agent", Command: config.Command, Width: 80}}}
+	s.state.Instances = append(s.state.Instances, in)
+	return in.ID, s.save()
+}
+
+func validPaneCommand(command string) bool { return command == "/bin/bash -l" || command == "yazi" }
+
+// Reserve the same operation slot as stop/delete/setup before touching the VM.
+func (s *Supervisor) paneOperation(instanceID string) (*live, context.Context, func(), error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return nil, nil, nil, errors.New("supervisor shutting down")
+	}
+	if s.instance(instanceID) == nil {
+		return nil, nil, nil, errors.New("instance not found")
+	}
+	l := s.live[instanceID]
+	if l == nil || l.busy {
+		return nil, nil, nil, errors.New("session is not attached or an operation is in progress")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	l.cancel = cancel
+	l.busy = true
+	l.done = make(chan struct{})
+	s.wg.Add(1)
+	return l, ctx, func() {
+		cancel()
+		s.mu.Lock()
+		l.busy = false
+		l.cancel = nil
+		close(l.done)
+		s.mu.Unlock()
+		s.wg.Done()
+	}, nil
+}
+
+func (s *Supervisor) AddPane(instanceID, command string) (string, error) {
+	if !validPaneCommand(command) {
+		return "", errors.New("pane command must be /bin/bash -l or yazi")
+	}
+	l, ctx, done, err := s.paneOperation(instanceID)
+	if err != nil {
+		return "", err
+	}
+	defer done()
+	pane := manager.Pane{ID: id(), Command: command, Width: 80}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.vm == nil {
+		return "", errors.New("instance is not running")
+	}
+	// Persist identity first; a failed attach is reconnectable, never orphaned.
+	if err := s.update(instanceID, func(i *manager.Instance) { i.Panes = append(i.Panes, pane) }); err != nil {
+		return "", err
+	}
+	cwd := "/workspace/repo"
+	if !s.instanceCopy(instanceID).Cloned {
+		cwd = "/"
+	}
+	if err := s.attachPane(ctx, instanceID, cwd, l, pane); err != nil {
+		return "", err
+	}
+	return pane.ID, nil
+}
+
+func (s *Supervisor) ClosePane(instanceID, paneID string) error {
+	l, ctx, done, err := s.paneOperation(instanceID)
+	if err != nil {
+		return err
+	}
+	defer done()
+	in := s.instanceCopy(instanceID)
+	found := false
+	for _, p := range in.Panes {
+		if p.ID == paneID {
+			found = true
+		}
+	}
+	if !found {
+		return errors.New("pane not found")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.vm == nil {
+		return errors.New("instance is not running")
+	}
+	target := quote("pane-" + paneID)
+	if err := l.vm.Run(ctx, "/", "if tmux -L manager has-session -t "+target+" 2>/dev/null; then tmux -L manager kill-session -t "+target+"; fi", io.Discard); err != nil {
+		return err
+	}
+	if p := l.panes[paneID]; p != nil {
+		_ = p.term.Close()
+		_ = p.process.Close()
+		delete(l.panes, paneID)
+	}
+	return s.update(instanceID, func(i *manager.Instance) {
+		for n, p := range i.Panes {
+			if p.ID == paneID {
+				if n == 0 {
+					i.Title = ""
+				}
+				i.Panes = append(i.Panes[:n], i.Panes[n+1:]...)
+				break
+			}
+		}
+	})
+}
+
+func (s *Supervisor) Rename(instanceID, name string) error {
+	name = strings.TrimSpace(cleanTitle(name))
+	if name == "" {
+		return errors.New("name is required")
+	}
+	return s.update(instanceID, func(i *manager.Instance) { i.Name = name })
+}
+func (s *Supervisor) Width(instanceID, paneID string, width int) error {
+	if width < 30 || width > 240 {
+		return errors.New("pane width must be between 30 and 240")
+	}
+	found := false
+	err := s.update(instanceID, func(i *manager.Instance) {
+		for n := range i.Panes {
+			if i.Panes[n].ID == paneID {
+				i.Panes[n].Width = width
+				found = true
+			}
+		}
+	})
+	if err == nil && !found {
+		return errors.New("pane not found")
+	}
+	return err
 }
 func (s *Supervisor) instance(id string) *manager.Instance {
 	for i := range s.state.Instances {
@@ -220,6 +488,16 @@ func (s *Supervisor) instance(id string) *manager.Instance {
 		}
 	}
 	return nil
+}
+func (s *Supervisor) instanceCopy(id string) manager.Instance {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if in := s.instance(id); in != nil {
+		out := *in
+		out.Panes = append([]manager.Pane{}, in.Panes...)
+		return out
+	}
+	return manager.Instance{}
 }
 func (s *Supervisor) update(id string, f func(*manager.Instance)) error {
 	s.mu.Lock()
@@ -278,7 +556,7 @@ func (s *Supervisor) Action(id, action string) error {
 	}
 	l := s.live[id]
 	if l == nil {
-		l = &live{}
+		l = &live{panes: map[string]*livePane{}}
 		s.live[id] = l
 	}
 	if l.busy {
@@ -303,6 +581,7 @@ func (s *Supervisor) Action(id, action string) error {
 		return errors.New("stop the running agent before retrying setup")
 	}
 	copy := *in
+	copy.Panes = append([]manager.Pane{}, in.Panes...)
 	ctx, cancel := context.WithCancel(context.Background())
 	l.cancel = cancel
 	l.busy = true
@@ -365,9 +644,6 @@ func (s *Supervisor) perform(ctx context.Context, in manager.Instance, l *live, 
 	defer l.mu.Unlock()
 	log := s.log(in.ID, in.Config)
 	defer log.Flush()
-	if action == "start" && l.process != nil && in.Status != "shell" {
-		return s.update(in.ID, func(i *manager.Instance) { i.Status = in.Status })
-	}
 	if action == "delete" || action == "stop" {
 		l.detachTerminal()
 		if e := s.backend.Control(ctx, "am-"+in.ID, in.RuntimeID, action == "delete"); e != nil {
@@ -423,11 +699,8 @@ func (s *Supervisor) perform(ctx context.Context, in manager.Instance, l *live, 
 			return err
 		}
 	}
-	if action == "retry" && l.process != nil && in.Status != "shell" {
+	if action == "retry" && len(l.panes) > 0 && in.Status != "shell" {
 		return errors.New("stop the running terminal before retrying setup")
-	}
-	if l.process != nil && in.Status == "shell" {
-		l.detachTerminal()
 	}
 	if action != "shell" && (!in.SetupDone || action == "retry") {
 		if err := s.update(in.ID, func(i *manager.Instance) { i.SetupDone = false; i.Status = "setup" }); err != nil {
@@ -440,21 +713,60 @@ func (s *Supervisor) perform(ctx context.Context, in manager.Instance, l *live, 
 		if err := s.update(in.ID, func(i *manager.Instance) { i.SetupDone = true }); err != nil {
 			return err
 		}
-		fmt.Fprintln(log, "Setup complete. Starting URI Agent PTY.")
+		fmt.Fprintln(log, "Setup complete. Starting Agent PTY.")
 	}
-	l.detachTerminal()
-	term := &screen{SafeEmulator: vt.NewSafeEmulator(80, 24)}
 	cwd := "/workspace/repo"
 	if action == "shell" && !in.Cloned {
 		cwd = "/"
 	}
-	p, err := l.vm.Terminal(context.Background(), cwd, terminalCommand(in.Config, action == "shell"), term)
+	panes := in.Panes
+	if action == "shell" {
+		panes = []manager.Pane{{ID: "recovery", Command: "/bin/bash -l", Width: 80}}
+		found := false
+		for _, p := range in.Panes {
+			if p.ID == "recovery" {
+				found = true
+			}
+		}
+		if !found {
+			if err := s.update(in.ID, func(i *manager.Instance) { i.Panes = append(i.Panes, panes[0]) }); err != nil {
+				return err
+			}
+		}
+	}
+	for _, saved := range panes {
+		if err := s.attachPane(ctx, in.ID, cwd, l, saved); err != nil {
+			return err
+		}
+	}
+	return s.update(in.ID, func(i *manager.Instance) {
+		if action == "shell" {
+			i.Status = "shell"
+		} else {
+			i.Status = "running"
+		}
+	})
+}
+
+func (s *Supervisor) attachPane(ctx context.Context, instanceID, cwd string, l *live, saved manager.Pane) error {
+	if l.panes[saved.ID] != nil {
+		return nil
+	}
+	if saved.Width < 30 || saved.Width > 240 {
+		saved.Width = 80
+	}
+	term := &screen{SafeEmulator: vt.NewSafeEmulator(saved.Width, 24)}
+	term.SetCallbacks(vt.Callbacks{Title: func(title string) {
+		// Called while screen.Write holds term.mu.
+		term.title = cleanTitle(title)
+	}})
+	cmd := "exec tmux -L manager new-session -A -s " + quote("pane-"+saved.ID) + " " + quote(saved.Command) + " \\; set-option status off \\; set-option set-titles on \\; set-option set-titles-string '#{pane_title}'"
+	p, err := l.vm.Terminal(ctx, cwd, cmd, term)
 	if err != nil {
-		term.Close()
+		_ = term.Close()
 		return err
 	}
-	l.term = term
-	l.process = p
+	l.panes[saved.ID] = &livePane{process: p, term: term}
 	go func() { _, _ = io.Copy(inputWriter{p}, term) }()
 	go func() {
 		err := p.Wait()
@@ -464,25 +776,22 @@ func (s *Supervisor) perform(ctx context.Context, in manager.Instance, l *live, 
 		defer l.mu.Unlock()
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		if l.process != p {
+		pane := l.panes[saved.ID]
+		if pane == nil || pane.process != p {
 			return
 		}
-		l.process = nil
-		if i := s.instance(in.ID); i != nil {
-			i.Status = "exited"
+		delete(l.panes, saved.ID)
+		if i := s.instance(instanceID); i != nil {
+			if len(l.panes) == 0 {
+				i.Status = "exited"
+			}
 			if err != nil {
 				i.Error = "PTY disconnected; Start to reconnect. See runtime diagnostics."
 			}
 			_ = s.save()
 		}
 	}()
-	return s.update(in.ID, func(i *manager.Instance) {
-		if action == "shell" {
-			i.Status = "shell"
-		} else {
-			i.Status = "running"
-		}
-	})
+	return nil
 }
 
 type inputWriter struct{ p backend.Process }
@@ -496,7 +805,7 @@ func (w inputWriter) Write(b []byte) (int, error) {
 }
 
 type Input struct {
-	ID         string
+	ID, PaneID string
 	Key        *uv.Key
 	Paste      *string
 	Mouse      *uv.Mouse
@@ -514,10 +823,17 @@ func (s *Supervisor) Input(in Input) error {
 	s.mu.Unlock()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.process == nil {
+	paneID := in.PaneID
+	if paneID == "" {
+		if instance := s.instanceCopy(in.ID); len(instance.Panes) > 0 {
+			paneID = instance.Panes[0].ID
+		}
+	}
+	pane := l.panes[paneID]
+	if pane == nil || pane.process == nil {
 		return errors.New("no attached terminal")
 	}
-	t, p := l.term, l.process
+	t, p := pane.term, pane.process
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if in.Rows > 0 && in.Cols > 0 {
@@ -616,6 +932,9 @@ func (w *logWriter) emit(line string) error {
 		return e
 	}
 	defer f.Close()
+	if e := privatefs.Protect(f.Name()); e != nil {
+		return e
+	}
 	_, e = io.WriteString(f, line)
 	return e
 }
