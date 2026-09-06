@@ -97,7 +97,8 @@ try {
     } catch {
         Remove-Item -Force -ErrorAction SilentlyContinue $staged
         if ($helperBackup) {
-            try { [IO.File]::Replace($helperBackup, $helperDestination, $null) }
+            # PowerShell 5.1 converts $null to an empty (invalid) backup path.
+            try { [IO.File]::Replace($helperBackup, $helperDestination, [NullString]::Value) }
             catch { Write-Warning "Could not restore the previous $helperName after activation failed: $($_.Exception.Message)" }
         } elseif ($helperCreated) {
             Remove-Item -LiteralPath $helperDestination -Force -ErrorAction SilentlyContinue
