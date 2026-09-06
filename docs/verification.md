@@ -87,7 +87,7 @@ passed the [release workflow](https://github.com/4fuu/agent-manager/actions/runs
 ARM64 image smoke tests run in containers, not microVMs. macOS and Linux ARM64
 hardware guest boot and authenticated Agent workflows remain unverified.
 
-## Managed login service checks (source/unreleased, 2026-09-06)
+## Managed login service checks (2026-09-06)
 
 - Native Windows x64 Task Scheduler and WSL2 Linux x64 `systemd --user` passed
   install/start/stop/status/uninstall, repeat operations, IPC readiness, clean
@@ -104,10 +104,14 @@ hardware guest boot and authenticated Agent workflows remain unverified.
   quoting, native-operation errors, registration retention on failure, concurrent
   operation rejection, shutdown lock release and status credential filtering.
   The service package also cross-compiles for macOS ARM64.
-- CI now includes the native synthetic-guest lifecycle check on all four build
-  targets. That new CI step has not yet run remotely. macOS LaunchAgent execution,
-  actual logout/login triggers and machine reboot behavior remain unverified;
-  definition tests and cross-compilation do not replace those checks.
+- [CI passed](https://github.com/4fuu/agent-manager/actions/runs/34037378407) native
+  synthetic-guest service lifecycle checks on Windows amd64, Linux amd64/arm64 and
+  macOS arm64, including failed-start recovery. Windows workers explicitly set
+  their default file owner to the user SID so WMI administrative tokens do not
+  create state owned by Administrators; existing ownership checks remain strict.
+- Actual logout/login triggers and machine reboot behavior remain unverified.
+  Synthetic-guest service tests do not establish hardware guest boot or
+  authenticated Agent compatibility.
 
 To exercise native registration with a synthetic supervisor (no VM required):
 
