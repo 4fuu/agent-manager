@@ -259,7 +259,9 @@ func TestControlLockAndStableIdentity(t *testing.T) {
 	if err = lockControl(f); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = Control("install", c); err == nil || !strings.Contains(err.Error(), "in progress") {
+	// Stop exercises the mutation lock without requiring an installed GUI host
+	// to satisfy Windows install's bundle preflight.
+	if _, err = Control("stop", c); err == nil || !strings.Contains(err.Error(), "in progress") {
 		t.Fatal("concurrent mutation allowed", err)
 	}
 }
