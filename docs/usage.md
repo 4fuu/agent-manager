@@ -19,7 +19,7 @@ may name an unnamed Session. A manually assigned **Name** remains fixed.
 | --- | --- |
 | `p` / `n` | New Project / Session |
 | `w` | Project / Session picker, including when the sidebar is hidden |
-| `i` / `g` | Image profiles / shared mappings |
+| `i` / `g` | Image manager / shared mappings |
 | `Space` | Context menu |
 | `Tab` | Focus the workspace; `Ctrl+]` returns to manager navigation |
 | Left / Right | Move between terminal columns |
@@ -39,10 +39,40 @@ confirmation. Stop preserves the disk.
 
 ## Image profiles and mappings
 
+Press `i` to open the dedicated image manager. Choose **New** to configure a
+display name, OCI registry reference (including GHCR) and launch command. The
+default command for a new custom image is `/bin/bash -l`; change it to the Agent
+executable supplied by that image. Existing profiles can be renamed and edited.
+
+Select a profile and choose **Download** (`d`). The supervisor resolves the Linux
+image for the host architecture, downloads verified layers and imports them into
+microsandbox's cache without creating a Session or VM. No Docker daemon is needed.
+The page shows archive bytes/percentage, import status, result digest and errors.
+Use **Cancel** (`c`) to stop, or **Download** again to retry or refresh a tag.
+Transfers continue after leaving the page or quitting the UI. Stopping the
+supervisor cancels them; interrupted transfers can be retried after restart.
+
+`n` creates a profile, `e` or Enter edits it, `x` deletes its configuration, Tab
+cycles focus (including the scrollable details), and Esc returns to the workspace.
+Deleting a profile retains downloaded layers and existing Sessions. During a
+transfer, its source cannot be changed or deleted; cancel and wait first.
+**Downloaded** records the last successful transfer, not a live cache audit;
+external cache removal or later tag changes require another download.
+
+Public images use anonymous access. Private pulls can use the supervisor user's
+Docker/Podman credential configuration, including installed credential helpers;
+this is separate from mapped guest credentials. Never put a token in the image
+reference. A credential helper must be available to the supervisor process and
+may delay cancellation while it resolves authentication.
+
 Built-in profiles are URI, Pi, OMP, Claude Code and Codex. A custom profile accepts
 exactly one OCI reference or absolute OCI archive path, a command, environment
 JSON and mappings. Archive selection is imported automatically with the SDK's
 `Image.Load`; see [image setup](../images/README.md).
+Download on an archive profile imports that local file. The bundled recipe tags
+use dated GHCR releases. Existing profiles keep their configured sources across
+upgrades; edit a profile to change its image version. See [installation](installation.md)
+for application installation and upgrades.
 
 Shared and profile mappings use one entry per line:
 

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/4fuu/agent-manager/internal/manager"
 )
@@ -16,6 +17,22 @@ import (
 // Fake is opt-in test infrastructure. It never executes commands on the host.
 // Disk markers model persistent VM identity; terminal output is synthetic.
 type Fake struct{ Dir string }
+
+func (f Fake) DownloadImage(ctx context.Context, p manager.ImageProfile, report func(manager.ImageDownload)) (string, error) {
+	for step := int64(0); step <= 20; step++ {
+		report(manager.ImageDownload{Status: "downloading", Completed: step * 5_000_000, Total: 100_000_000})
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	if strings.Contains(p.Image, "fail-pull") {
+		return "", errors.New("[FAKE] registry download failed; edit the reference and retry")
+	}
+	report(manager.ImageDownload{Status: "importing"})
+	return "sha256:fake-image", nil
+}
 
 func (f Fake) Create(_ context.Context, name string, p manager.Project) (VM, error) {
 	if e := os.MkdirAll(f.Dir, 0700); e != nil {

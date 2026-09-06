@@ -11,11 +11,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/4fuu/agent-manager/internal/buildinfo"
 	"github.com/4fuu/agent-manager/internal/privatefs"
 )
 
-// Built and imported locally using images/Containerfile; no unpublished registry default.
-const DefaultImage = "uri-agent-manager:2026.904.3"
+var DefaultImage = "ghcr.io/4fuu/agent-manager/uri:" + buildinfo.Version
 
 const StateVersion = 3
 
@@ -48,7 +48,19 @@ type ImageProfile struct {
 	Command     string
 	Mappings    []Mapping
 	Environment map[string]string
+	Download    ImageDownload
 }
+
+// Download records the last explicit transfer, not a guarantee against external cache removal.
+type ImageDownload struct {
+	Status, Error, Digest string
+	Completed, Total      int64
+}
+
+func (d ImageDownload) Active() bool {
+	return d.Status == "resolving" || d.Status == "downloading" || d.Status == "importing" || d.Status == "cancelling"
+}
+
 type Pane struct {
 	ID      string
 	Command string
@@ -77,10 +89,10 @@ type State struct {
 
 var builtinImages = []ImageProfile{
 	{ID: "uri", Name: "URI Agent", Image: DefaultImage, Command: "uri-agent", Environment: map[string]string{"URI_AGENT_CONFIG_DIR": "/root/.config/uri-agent"}},
-	{ID: "pi", Name: "Pi", Image: "uri-agent-manager-pi:local", Command: "pi"},
-	{ID: "omp", Name: "Oh My Pi", Image: "uri-agent-manager-omp:local", Command: "omp"},
-	{ID: "claude", Name: "Claude Code", Image: "uri-agent-manager-claude:local", Command: "claude"},
-	{ID: "codex", Name: "Codex", Image: "uri-agent-manager-codex:local", Command: "codex"},
+	{ID: "pi", Name: "Pi", Image: "ghcr.io/4fuu/agent-manager/pi:" + buildinfo.Version, Command: "pi"},
+	{ID: "omp", Name: "Oh My Pi", Image: "ghcr.io/4fuu/agent-manager/omp:" + buildinfo.Version, Command: "omp"},
+	{ID: "claude", Name: "Claude Code", Image: "ghcr.io/4fuu/agent-manager/claude:" + buildinfo.Version, Command: "claude"},
+	{ID: "codex", Name: "Codex", Image: "ghcr.io/4fuu/agent-manager/codex:" + buildinfo.Version, Command: "codex"},
 }
 
 // BuiltinImages returns independent profiles for images built from images/Containerfile.

@@ -1,0 +1,49 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, ubuntu-24.04, ubuntu-24.04-arm, macos-26]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CGO_ENABLED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.2'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check formatting and version
+        run: |
+          test -z "$(gofmt -l cmd internal)"
+          python script/release.py version
+      - name: Test, race, vet and build
+        run: |
+          go test ./...
+          go test -race ./...
+          go vet ./...
+          go build ./cmd/agent-manager
+      - name: Installer and release tests
+        run: python -m unittest discover -s script -p 'test_*.py' -v
+
+  image:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and smoke-test common environment and URI target
+        run: bash script/images.sh uri

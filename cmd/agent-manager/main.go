@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/4fuu/agent-manager/internal/backend"
+	"github.com/4fuu/agent-manager/internal/buildinfo"
 	"github.com/4fuu/agent-manager/internal/manager"
 	"github.com/4fuu/agent-manager/internal/supervisor"
 	"github.com/4fuu/agent-manager/internal/ui"
@@ -26,6 +27,10 @@ func main() {
 func run() error {
 	mode := "ui"
 	args := os.Args[1:]
+	if len(args) == 1 && (args[0] == "--version" || args[0] == "version") {
+		fmt.Printf("agent-manager %s (%s)\n", buildinfo.Version, buildinfo.Commit)
+		return nil
+	}
 	if len(args) > 0 && len(args[0]) > 0 && args[0][0] != '-' {
 		mode = args[0]
 		args = args[1:]
@@ -79,7 +84,7 @@ func run() error {
 		}
 		return e
 	default:
-		return fmt.Errorf("usage: agent-manager [ui|serve|doctor|runtime-install|image-load] [--state DIR]; serve accepts --fake")
+		return fmt.Errorf("usage: agent-manager [ui|serve|doctor|runtime-install|image-load|version] [--state DIR]; serve accepts --fake")
 	}
 }
 

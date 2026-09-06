@@ -30,12 +30,21 @@ never replaced automatically. Host reboot does not restore RAM processes.
 The supplied Debian Trixie recipe has local targets for URI Agent, Pi, OMP,
 Claude Code and Codex. Their common base contains Git, GitHub CLI, ripgrep, fd,
 Yazi, Bash, tmux, curl, Node.js, Python and build tools. No registry images are
-published and no OCI builder is installed by Agent Manager.
+bundled in the application archive; release images are downloaded from GHCR.
+Agent Manager does not install an OCI builder.
 
 Profiles accept an OCI reference or an absolute OCI archive path. Archives are
 loaded automatically into microsandbox through `Image.Load`. Registry credentials
 are separate from Git clone credentials. Build commands and exact targets are in
 [images/README.md](../images/README.md).
+
+Explicit image downloads belong to the supervisor and do not create VMs. Since
+the pinned Go SDK lacks a standalone pull API, the backend streams verified OCI
+blobs into a private temporary Docker archive and calls `Image.Load`. Progress
+counts archive bytes, including metadata; import is a separate phase. Temporary
+archives are removed after success, failure or cooperative cancellation. A hard
+process kill can leave an OS temporary directory; transfers retry from the start,
+not from a saved byte offset. A completed import remains in the runtime cache.
 
 The guest runs as root and uses a managed 16 GiB disk, 4 GiB memory and 2 vCPUs.
 Mappings are explicit bind mounts, read-only unless `rw` is selected. Files and
@@ -58,8 +67,9 @@ input/resize ownership remain design gaps.
 
 The Go module pins microsandbox v0.6.17 and uses its detached sandbox, managed disk,
 bind mount, TTY and `Image.Load` APIs. Native Windows x64/WHP is the tested runtime
-baseline; the upstream Windows runtime remains preview. Linux and macOS remain
-platform goals and require their own hardware verification.
+baseline; the upstream Windows runtime remains preview. Linux x64/KVM is tested
+under WSL2. Other Linux hosts and macOS require their own hardware verification.
 
-Image build/import, registry login, private clone, and real URI/Pi/OMP/Claude/Codex
-login and compatibility have not been verified. See [verification.md](verification.md).
+The five Linux amd64 images build and pass archive import and guest startup checks.
+Registry login, private clone, and authenticated Agent/model workflows have not
+been verified. See [verification.md](verification.md).

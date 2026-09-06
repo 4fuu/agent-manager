@@ -1,0 +1,218 @@
+name: Release
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          version=$(python script/release.py version --today)
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse "v$version" >/dev/null 2>&1; then
+            test "$(git rev-list -n 1 "v$version")" = "$GITHUB_SHA"
+          fi
+          if gh release view "v$version" --json isDraft --jq '.isDraft' > /tmp/draft 2>/dev/null; then
+            test "$(cat /tmp/draft)" = true
+          fi
+
+  verify:
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: [validate, verify]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            target: windows-amd64
+          - os: ubuntu-24.04
+            target: linux-amd64
+          - os: ubuntu-24.04-arm
+            target: linux-arm64
+          - os: macos-26
+            target: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.2'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build native Windows or macOS bundle
+        if: runner.os != 'Linux'
+        run: python script/release.py build
+      - name: Build Linux bundle with Debian 12 glibc baseline
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm -v "$PWD:/src" -w /src golang:1.26.2-bookworm \
+            sh -c 'apt-get update && apt-get install -y --no-install-recommends python3 && git config --global --add safe.directory /src && python3 script/release.py build'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist/agent-manager-*
+          if-no-files-found: error
+
+  images:
+    needs: [validate, verify]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build, smoke-test and push each native image
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          for target in uri pi omp claude codex; do
+            bash script/images.sh "$target" "$VERSION-$ARCH"
+            docker push "ghcr.io/4fuu/agent-manager/$target:$VERSION-$ARCH"
+          done
+
+  publish:
+    needs: [validate, build, images]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: dist
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish multi-architecture manifests
+        run: |
+          echo '{}' > dist/images.json
+          for target in uri pi omp claude codex; do
+            image="ghcr.io/4fuu/agent-manager/$target"
+            docker buildx imagetools create --tag "$image:$VERSION" "$image:$VERSION-amd64" "$image:$VERSION-arm64"
+            digest=$(docker buildx imagetools inspect "$image:$VERSION" --format '{{json .Manifest.Digest}}' | tr -d '"')
+            jq --arg name "$target" --arg ref "$image@$digest" '. + {($name): $ref}' dist/images.json > dist/images.tmp
+            mv dist/images.tmp dist/images.json
+          done
+      - name: Require anonymous GHCR access before release
+        run: |
+          for target in uri pi omp claude codex; do
+            if ! DOCKER_CONFIG=$(mktemp -d) docker manifest inspect "ghcr.io/4fuu/agent-manager/$target:$VERSION" >/dev/null; then
+              echo "::error::Make agent-manager/$target Public in https://github.com/users/4fuu/packages/container/agent-manager%2F$target/settings then rerun failed jobs. GitHub does not inherit package visibility from a public repository."
+              exit 1
+            fi
+          done
+      - name: Checksums and package manager metadata
+        run: |
+          git fetch origin main
+          changed=$(git diff --name-only "$GITHUB_SHA" origin/main -- . ':!bucket/agent-manager.json' ':!Formula/agent-manager.rb')
+          test -z "$changed"
+          git checkout -B release-metadata origin/main
+          python script/release.py checksums
+          python script/release.py metadata
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add bucket/agent-manager.json Formula/agent-manager.rb
+          git diff --cached --quiet || git commit -m "release: update package metadata for v$VERSION"
+          git push origin HEAD:main
+      - name: Publish release and latest image aliases
+        run: |
+          if ! gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release create "v$VERSION" --target "$GITHUB_SHA" --draft --title "v$VERSION" --generate-notes
+          fi
+          gh release upload "v$VERSION" dist/agent-manager-* dist/SHA256SUMS dist/images.json --clobber
+          gh release edit "v$VERSION" --draft=false --latest
+          for target in uri pi omp claude codex; do
+            image="ghcr.io/4fuu/agent-manager/$target"
+            docker buildx imagetools create --tag "$image:latest" "$image:$VERSION"
+          done
+
+  smoke-install:
+    needs: [validate, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025, ubuntu-24.04, ubuntu-24.04-arm, macos-26]
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Windows standalone and Scoop installation
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          & ./script/install.ps1 -Version $env:VERSION -InstallDir "$env:RUNNER_TEMP\am-install"
+          & "$env:RUNNER_TEMP\am-install\agent-manager.exe" --version
+          Invoke-RestMethod https://get.scoop.sh -OutFile "$env:RUNNER_TEMP\scoop.ps1"
+          & "$env:RUNNER_TEMP\scoop.ps1" -RunAsAdmin
+          & "$HOME\scoop\shims\scoop.cmd" bucket add agent-manager https://github.com/4fuu/agent-manager
+          & "$HOME\scoop\shims\scoop.cmd" install agent-manager
+          & "$HOME\scoop\shims\agent-manager.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Unix standalone installation
+        if: runner.os != 'Windows'
+        env:
+          AGENT_MANAGER_INSTALL_DIR: ${{ runner.temp }}/am-install
+        run: |
+          sh script/install.sh "$VERSION"
+          "$AGENT_MANAGER_INSTALL_DIR/agent-manager" --version
+      - name: Homebrew installation
+        if: runner.os == 'macOS'
+        run: |
+          brew tap 4fuu/agent-manager https://github.com/4fuu/agent-manager
+          brew install 4fuu/agent-manager/agent-manager
+          brew test 4fuu/agent-manager/agent-manager

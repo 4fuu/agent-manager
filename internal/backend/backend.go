@@ -1,4 +1,4 @@
-// Package backend defines operations that always execute inside the guest.
+// Package backend owns runtime images and execution inside guests, never host command fallbacks.
 package backend
 
 import (
@@ -26,6 +26,7 @@ type VM interface {
 	Release() error
 }
 type Backend interface {
+	DownloadImage(context.Context, manager.ImageProfile, func(manager.ImageDownload)) (string, error)
 	Create(context.Context, string, manager.Project) (VM, error)
 	Open(context.Context, string, string, bool) (VM, error)
 	Inspect(context.Context, string, string) (string, error)

@@ -33,6 +33,7 @@ type UI struct {
 	sidebarWidth                           int
 	modalView                              tview.Primitive
 	modalWidth, modalHeight                int
+	images                                 *imageManager
 	refreshMu                              sync.Mutex
 	actions                                chan func()
 	done                                   chan struct{}
@@ -109,6 +110,9 @@ func New(c *supervisor.Client) *UI {
 	u.term.escape = func() { u.app.SetFocus(u.tree) }
 	u.app.SetBeforeDrawFunc(func(s tcell.Screen) bool {
 		w, h := s.Size()
+		if u.images != nil {
+			u.images.layout(w)
+		}
 		side := u.sidebarWidth
 		if u.hideSidebar || w < 72 {
 			side = 0
@@ -127,7 +131,7 @@ func New(c *supervisor.Client) *UI {
 		if u.selected == "" {
 			u.heading.SetText(" [::b]AGENT MANAGER[::-]  [#82909e]Projects / Sessions")
 		}
-		if !u.modal {
+		if !u.modal && u.images == nil {
 			u.hints()
 		}
 		return false
@@ -140,7 +144,7 @@ func New(c *supervisor.Client) *UI {
 				return nil, a
 			}
 		}
-		if !u.modal && !u.hideSidebar && u.body.GetItemCount() > 1 {
+		if !u.modal && u.images == nil && !u.hideSidebar && u.body.GetItemCount() > 1 {
 			if a == tview.MouseLeftDown && x == u.sidebarWidth-1 {
 				u.dragging = true
 			}
@@ -157,6 +161,13 @@ func New(c *supervisor.Client) *UI {
 		return e, a
 	})
 	u.app.SetInputCapture(func(e *tcell.EventKey) *tcell.EventKey {
+		if u.images != nil && !u.modal {
+			if e.Key() == tcell.KeyCtrlQ {
+				u.app.Stop()
+				return nil
+			}
+			return u.images.input(e)
+		}
 		if !u.modal && u.focusedTerminal() != nil {
 			if e.Key() == tcell.KeyCtrlC {
 				u.focusedTerminal().InputHandler()(e, func(p tview.Primitive) { u.app.SetFocus(p) })
@@ -538,6 +549,9 @@ func (u *UI) refresh() {
 		}
 		previousStatus := u.selectedInstance().Status
 		u.state = out.State
+		if u.images != nil {
+			u.images.update()
+		}
 		present := map[string]bool{}
 		for _, session := range u.state.Instances {
 			present[session.ID] = true
@@ -552,7 +566,7 @@ func (u *UI) refresh() {
 			u.selected = ""
 			u.strip = newWorkspace()
 			u.right.AddPage("workspace", u.strip, true, true)
-			if !u.modal {
+			if !u.modal && u.images == nil {
 				u.app.SetFocus(u.tree)
 			}
 		}
@@ -654,7 +668,11 @@ func (u *UI) closeModal() {
 	u.modal = false
 	u.modalView = nil
 	u.pages.RemovePage("modal")
-	u.app.SetFocus(u.tree)
+	if u.images != nil {
+		u.app.SetFocus(u.images.list)
+	} else {
+		u.app.SetFocus(u.tree)
+	}
 }
 func (u *UI) confirm(text, label string, f func()) {
 	m := tview.NewModal().SetText(text).AddButtons([]string{"Cancel", label}).SetDoneFunc(func(i int, _ string) {
@@ -856,20 +874,6 @@ func (u *UI) defaultsForm() {
 		u.saveForm(supervisor.Request{Action: "defaults", Mappings: ms})
 	}).AddButton("Cancel", u.closeModal)
 	u.popup(f, 86, 20)
-}
-func (u *UI) imagesMenu() {
-	list := tview.NewList()
-	list.SetBorder(true).SetTitle(" IMAGES · configured before session creation ")
-	for _, p := range u.state.Images {
-		profile := p
-		source := p.Image
-		if p.Archive != "" {
-			source = p.Archive
-		}
-		list.AddItem(p.Name, source, 0, func() { u.closeModal(); u.imageForm(profile) })
-	}
-	list.AddItem("+ Custom image", "OCI reference or local archive", 'n', func() { u.closeModal(); u.imageForm(manager.ImageProfile{}) })
-	u.popup(list, 84, min(26, 2*list.GetItemCount()+2))
 }
 func (u *UI) imageForm(p manager.ImageProfile) {
 	f := newForm("IMAGE PROFILE")

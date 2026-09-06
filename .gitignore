@@ -1,3 +1,5 @@
 /agent-manager
 /agent-manager.exe
 /.amp/
+/dist/
+__pycache__/

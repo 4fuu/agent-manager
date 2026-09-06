@@ -78,13 +78,14 @@ func (t *screen) Close() error {
 }
 
 type Supervisor struct {
-	mu      sync.Mutex
-	wg      sync.WaitGroup
-	closing bool
-	Dir     string
-	state   manager.State
-	backend backend.Backend
-	live    map[string]*live
+	mu        sync.Mutex
+	wg        sync.WaitGroup
+	closing   bool
+	Dir       string
+	state     manager.State
+	backend   backend.Backend
+	live      map[string]*live
+	downloads map[string]context.CancelFunc
 }
 
 func New(dir string, b backend.Backend) (*Supervisor, error) {
@@ -95,7 +96,13 @@ func New(dir string, b backend.Backend) (*Supervisor, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Supervisor{Dir: dir, state: st, backend: b, live: map[string]*live{}}
+	s := &Supervisor{Dir: dir, state: st, backend: b, live: map[string]*live{}, downloads: map[string]context.CancelFunc{}}
+	for i := range s.state.Images {
+		if s.state.Images[i].Download.Active() {
+			s.state.Images[i].Download.Status = "interrupted"
+			s.state.Images[i].Download.Error = "Supervisor stopped during transfer. Download again to retry."
+		}
+	}
 	// Query persisted runtime state without booting. A live VM is not a live UI PTY.
 	for i := range s.state.Instances {
 		in := &s.state.Instances[i]
@@ -236,8 +243,15 @@ func (s *Supervisor) Image(profile manager.ImageProfile) error {
 	profile.Environment = environment
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	profile.Download = manager.ImageDownload{}
 	for i := range s.state.Images {
 		if s.state.Images[i].ID == profile.ID {
+			old := s.state.Images[i]
+			if old.Image == profile.Image && old.Archive == profile.Archive {
+				profile.Download = old.Download
+			} else if s.downloads[profile.ID] != nil {
+				return errors.New("cancel the download before changing its source")
+			}
 			s.state.Images[i] = profile
 			return s.save()
 		}
@@ -249,6 +263,9 @@ func (s *Supervisor) Image(profile manager.ImageProfile) error {
 func (s *Supervisor) DeleteImage(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.downloads[id] != nil {
+		return errors.New("cancel the download before deleting its profile")
+	}
 	for i := range s.state.Images {
 		if s.state.Images[i].ID == id {
 			s.state.Images = append(s.state.Images[:i], s.state.Images[i+1:]...)
@@ -621,6 +638,9 @@ func (s *Supervisor) Action(id, action string) error {
 func (s *Supervisor) Close() {
 	s.mu.Lock()
 	s.closing = true
+	for _, cancel := range s.downloads {
+		cancel()
+	}
 	for _, l := range s.live {
 		if l.cancel != nil {
 			l.cancel()

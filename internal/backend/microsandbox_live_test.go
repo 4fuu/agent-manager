@@ -123,6 +123,48 @@ func TestMicrosandboxLiveDiskAndFileMount(t *testing.T) {
 	}
 }
 
+// Tests an exported Agent image through the production archive importer and VM.
+func TestMicrosandboxLiveAgentArchive(t *testing.T) {
+	archive := os.Getenv("AGENT_MANAGER_IMAGE_ARCHIVE")
+	if os.Getenv("AGENT_MANAGER_LIVE_TEST") != "1" || archive == "" {
+		t.Skip("set AGENT_MANAGER_LIVE_TEST=1 and AGENT_MANAGER_IMAGE_ARCHIVE to a built image tar")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	b := Microsandbox{}
+	name := fmt.Sprintf("am-image-test-%d", time.Now().UnixNano())
+	t.Cleanup(func() {
+		cleanup, done := context.WithTimeout(context.Background(), 30*time.Second)
+		defer done()
+		if err := b.Control(cleanup, name, "", true); err != nil {
+			t.Error(err)
+		}
+	})
+	v, err := b.Create(ctx, name, manager.Project{Name: "image-check", URL: "https://github.com/a/b", Archive: archive, Command: "/bin/bash"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer v.Release()
+	var output bytes.Buffer
+	err = v.Run(ctx, "/workspace", `set -eu
+for tool in python pip node npm git gh rg fd fzf jq yazi ya tmux bash ssh less file ps ip ping dig zip unzip gcc g++ make; do
+  command -v "$tool"
+done
+python --version
+python -m venv /tmp/image-venv
+/tmp/image-venv/bin/python -c 'import ssl, sqlite3; print("python-ok")'
+/tmp/image-venv/bin/pip --version
+node -e 'console.log("node-ok", process.version)'
+for agent in uri-agent pi omp claude codex; do
+  if command -v "$agent"; then "$agent" --version; echo agent-ok; exit 0; fi
+done
+exit 1`, &output)
+	t.Log(output.String())
+	if err != nil || !strings.Contains(output.String(), "agent-ok") {
+		t.Fatalf("built image guest smoke test: %v", err)
+	}
+}
+
 type terminalOutput chan string
 
 func (out terminalOutput) Write(b []byte) (int, error) {

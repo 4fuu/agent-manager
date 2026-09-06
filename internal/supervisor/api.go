@@ -150,6 +150,10 @@ func (s *Supervisor) Handler() http.Handler {
 			e = s.Image(req.Profile)
 		case "delete-image":
 			e = s.DeleteImage(req.ID)
+		case "download-image":
+			e = s.DownloadImage(req.ID)
+		case "cancel-image-download":
+			e = s.CancelImageDownload(req.ID)
 		case "add-pane":
 			out.ID, e = s.AddPane(req.ID, req.Command)
 		case "close-pane":

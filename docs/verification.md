@@ -40,12 +40,32 @@ Go 1.26.2 with GCC, WSL kernel 6.6.87.2 and accessible `/dev/kvm`:
 
 - Full unit tests, race tests, vet and Linux CLI build passed.
 - Runtime 0.6.17 installed; `doctor` passed prerequisite and file checks.
-- Both real microVM tests failed while downloading Alpine 3.22 from Docker Hub,
-  before guest boot. WSL runtime operation is therefore not verified.
-- Rootless Docker image build failed resolving `node:22-trixie`: DNS requests to
-  `10.0.2.3:53` timed out. Direct Podman pull also timed out connecting to Docker
-  Hub. No supplied Agent image build completed; network access must be repaired
-  before retrying the commands in [images/README.md](../images/README.md).
+- Both real microVM tests passed: file mounts, PTY, persistent disk, directory
+  mappings, setup, same-sandbox sibling terminals, titles and reconnect.
+
+## Agent image checks (2026-09-06)
+
+All five Linux amd64 targets built with Docker in WSL2. Each exported `.tar` was
+imported through the production backend and booted on Windows WHP and WSL2 KVM.
+Every image passed Python venv creation, pip execution, Python ssl/sqlite imports,
+Node execution, common tool lookup and its Agent's `--version` command. The build
+also checks Agent availability in a login Bash shell. These are startup smoke
+tests, not authenticated Agent/model workflows. Sizes and installed versions are
+recorded in [images/README.md](../images/README.md).
+
+## Image manager checks (2026-09-06)
+
+- Native Windows and WSL2 both downloaded `ghcr.io/astral-sh/uv:0.8.0`
+  by tag and digest through the production backend, imported it and inspected the
+  cache by the original reference. These checks did not create a sandbox or use
+  a Docker daemon. Private registry authentication remains unverified.
+- Native Windows ConPTY against the fake backend exercised custom image creation,
+  validation, editing, download/cancel/retry, UI detachment during a transfer,
+  persisted completion after reopening, mouse download and visible failure.
+  Rendered forms, progress, completion and failure states were inspected.
+- Unit tests cover registry streaming, platform validation, cancellation,
+  supervisor job persistence and recovery, source-edit invariants and UI focus.
+  Full tests, race tests, vet and builds passed on Windows and WSL2.
 
 ## Current opt-in checks
 
@@ -59,6 +79,21 @@ go test -v ./internal/supervisor -run TestLiveWorkspaceTitlesDirectoryAndReconne
 Remove-Item Env:AGENT_MANAGER_LIVE_TEST
 ```
 
+To verify a built image archive on either host, set `AGENT_MANAGER_LIVE_TEST=1`
+and `AGENT_MANAGER_IMAGE_ARCHIVE` to its absolute `.tar` path, then run:
+
+```sh
+go test -v ./internal/backend -run TestMicrosandboxLiveAgentArchive -count=1 -timeout 7m
+```
+
+To exercise a real registry pull without creating a VM, set
+`AGENT_MANAGER_LIVE_TEST=1` and
+`AGENT_MANAGER_PULL_IMAGE=ghcr.io/astral-sh/uv:0.8.0`, then run:
+
+```sh
+go test -v ./internal/backend -run TestLiveRegistryDownloadWithoutSandbox -count=1 -timeout 7m
+```
+
 For manual UI verification, run `serve --fake` separately and exercise Project
 creation, image selection, Session creation, failed setup logs/retry/recovery,
 shell and Yazi columns, mouse hit routing, focus, scroll/reveal, width adjustment,
@@ -67,7 +102,7 @@ with the real native runtime before recording it as runtime coverage.
 
 ## Unverified boundaries
 
-- Building/importing the supplied images and registry login.
+- ARM64 image builds and registry login.
 - Private Git clone and actual URI, Pi, OMP, Claude and Codex login/compatibility.
 - Host-reboot recovery, Windows ARM64, Linux and macOS end-to-end operation.
 - Explicit multi-client input/resize ownership and edit-conflict detection.
