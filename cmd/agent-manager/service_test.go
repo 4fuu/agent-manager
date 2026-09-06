@@ -143,7 +143,11 @@ public static class LauncherConsoleProbe {
             var window = GetConsoleWindow();
             var visible = IsWindowVisible(window);
             FreeConsole();
-            throw new Exception(name + " " + pid + " console=" + window + " visible=" + visible);
+            // CREATE_NO_WINDOW permits a headless console object. Reject a
+            // window handle, even if hidden, rather than console attachment.
+            if (window != IntPtr.Zero)
+                throw new Exception(name + " " + pid + " console=" + window + " visible=" + visible);
+            return;
         }
         if (Marshal.GetLastWin32Error() != 6) throw new Exception("Console probe failed");
     }
