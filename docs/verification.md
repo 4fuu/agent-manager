@@ -67,6 +67,26 @@ recorded in [images/README.md](../images/README.md).
   supervisor job persistence and recovery, source-edit invariants and UI focus.
   Full tests, race tests, vet and builds passed on Windows and WSL2.
 
+## First release checks (2026-09-06)
+
+[v2026.906.0](https://github.com/4fuu/agent-manager/releases/tag/v2026.906.0)
+passed the [release workflow](https://github.com/4fuu/agent-manager/actions/runs/34024004986):
+
+- Tests, race checks, vet, builds and installer fixtures on Windows amd64,
+  Linux amd64/arm64 and macOS arm64.
+- All five image builds and Agent/Python/Node/tool smoke tests on native amd64
+  and arm64 Docker runners; anonymous GHCR manifest access for every target.
+- Installation from the published program archives on all four platforms,
+  including Windows Scoop and Apple Silicon Homebrew.
+- The actual release Windows and Linux amd64 bundles installed locally and passed
+  `--version` and `doctor` natively on Windows and in WSL2.
+- The published URI image was pulled through the production downloader, imported
+  and booted on Windows WHP and WSL2 KVM. URI, Python, Node, pip/venv and common
+  tool checks passed in both guests; temporary test VMs were deleted afterward.
+
+ARM64 image smoke tests run in containers, not microVMs. macOS and Linux ARM64
+hardware guest boot and authenticated Agent workflows remain unverified.
+
 ## Current opt-in checks
 
 The checks below are destructive only to uniquely named test guests, but download
@@ -102,7 +122,7 @@ with the real native runtime before recording it as runtime coverage.
 
 ## Unverified boundaries
 
-- ARM64 image builds and registry login.
+- Private registry login and ARM64 microVM execution.
 - Private Git clone and actual URI, Pi, OMP, Claude and Codex login/compatibility.
 - Host-reboot recovery, Windows ARM64, Linux and macOS end-to-end operation.
 - Explicit multi-client input/resize ownership and edit-conflict detection.

@@ -117,6 +117,32 @@ class InstallerTests(unittest.TestCase):
         self.assertNotEqual(unsupported.returncode, 0)
         self.assertIn(b"unsupported target", unsupported.stderr)
 
+    @unittest.skipUnless(os.name == "posix", "native POSIX test")
+    def test_latest_redirect_and_download_path(self):
+        fixture = self.tmp / "fixture"
+        self.make_unix_fixture(fixture)
+        fake_bin = self.tmp / "fake-bin"
+        fake_bin.mkdir()
+        curl = fake_bin / "curl"
+        curl.write_text('''#!/bin/sh
+set -eu
+case "$*" in
+  *url_effective*) printf 'https://github.com/4fuu/agent-manager/releases/tag/v2026.906.0'; exit 0;;
+esac
+out=
+while [ "$#" -gt 0 ]; do
+  case "$1" in -o) out=$2; shift 2;; *) url=$1; shift;; esac
+done
+cp "$TEST_RELEASE_DIR/${url##*/}" "$out"
+''')
+        curl.chmod(0o755)
+        install = self.tmp / "bin"
+        env = dict(os.environ, TEST_RELEASE_DIR=str(fixture), PATH=str(fake_bin) + os.pathsep + os.environ["PATH"])
+        env.pop("AGENT_MANAGER_FIXTURE_DIR", None)
+        result = subprocess.run(["sh", str(ROOT / "script/install.sh"), "--install-dir", str(install)], env=env, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(VERSION.encode(), subprocess.check_output([str(install / "agent-manager"), "--version"]))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

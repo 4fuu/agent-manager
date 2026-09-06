@@ -24,7 +24,8 @@ if [ -n "$fixture" ]; then
 else
   need curl
   if [ "$version" = latest ]; then
-    version=$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" | awk -F'"' '/"tag_name"[[:space:]]*:/ {print $4; exit}')
+    latest_url=$(curl --proto '=https' --tlsv1.2 -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest")
+    version=${latest_url##*/}
   fi
 fi
 version=${version#v}
