@@ -45,6 +45,16 @@ try {
     Expand-Archive -LiteralPath $archivePath -DestinationPath $unpack
     $candidate = Join-Path $unpack "agent-manager.exe"
     if (-not (Test-Path -LiteralPath $candidate -PathType Leaf) -or -not (Test-Path (Join-Path $unpack 'README.md') -PathType Leaf) -or -not (Test-Path (Join-Path $unpack 'docs') -PathType Container)) { throw "archive layout is invalid" }
+    $requiresHelper = [version]$Version -ge [version]'2026.907.0'
+    $helperName = "agent-manager-service-$Version.exe"
+    $helperCandidate = Join-Path $unpack $helperName
+    if ($requiresHelper -and -not (Test-Path -LiteralPath $helperCandidate -PathType Leaf)) { throw "archive layout is invalid: missing $helperName" }
+    if (Test-Path -LiteralPath $helperCandidate -PathType Leaf) {
+        $pe = [IO.File]::ReadAllBytes($helperCandidate)
+        if ($pe.Length -lt 64 -or $pe[0] -ne 77 -or $pe[1] -ne 90) { throw "invalid service helper PE header" }
+        $offset = [BitConverter]::ToUInt32($pe, 60)
+        if ([long]$offset + 94 -gt $pe.Length -or [BitConverter]::ToUInt32($pe, $offset) -ne 17744 -or [BitConverter]::ToUInt16($pe, $offset + 4) -ne 34404 -or [BitConverter]::ToUInt16($pe, $offset + 24) -ne 523 -or [BitConverter]::ToUInt16($pe, $offset + 92) -ne 2) { throw "service helper must be an amd64 GUI-subsystem executable" }
+    }
     $reported = & $candidate --version 2>$null
     if ($LASTEXITCODE -ne 0 -or ($reported -join "`n") -notmatch ('^agent-manager ' + [regex]::Escape($Version) + '( \(|$)')) { throw "downloaded executable failed its version test or reports the wrong version" }
 
@@ -53,10 +63,32 @@ try {
     if (Test-Path -LiteralPath (Join-Path $unpack 'LICENSE')) {
         Copy-Item -LiteralPath (Join-Path $unpack 'LICENSE') -Destination (Join-Path $InstallDir 'LICENSE') -Force
     }
+    $helperDestination = Join-Path $InstallDir $helperName
+    $helperBackup = $null
+    $helperCreated = $false
+    if (Test-Path -LiteralPath $helperCandidate -PathType Leaf) {
+        $candidateHash = (Get-FileHash -Algorithm SHA256 $helperCandidate).Hash
+        if (-not (Test-Path -LiteralPath $helperDestination -PathType Leaf) -or (Get-FileHash -Algorithm SHA256 $helperDestination).Hash -cne $candidateHash) {
+            $helperStaged = Join-Path $InstallDir (".$helperName-" + [guid]::NewGuid().ToString('N'))
+            Copy-Item -LiteralPath $helperCandidate -Destination $helperStaged
+            try {
+                if (Test-Path -LiteralPath $helperDestination) {
+                    $helperBackup = $helperStaged + '.previous'
+                    [IO.File]::Replace($helperStaged, $helperDestination, $helperBackup)
+                } else {
+                    [IO.File]::Move($helperStaged, $helperDestination)
+                    $helperCreated = $true
+                }
+            } catch {
+                Remove-Item -LiteralPath $helperStaged -Force -ErrorAction SilentlyContinue
+                throw "could not publish $helperName; the existing installation was preserved: $($_.Exception.Message)"
+            }
+        }
+    }
     $destination = Join-Path $InstallDir "agent-manager.exe"
     $staged = Join-Path $InstallDir (".agent-manager-" + [guid]::NewGuid().ToString('N') + '.exe')
-    Copy-Item $candidate $staged
     try {
+        Copy-Item $candidate $staged
         if (Test-Path -LiteralPath $destination) {
             $backup = $staged + '.previous'
             [IO.File]::Replace($staged, $destination, $backup)
@@ -64,8 +96,15 @@ try {
         } else { [IO.File]::Move($staged, $destination) }
     } catch {
         Remove-Item -Force -ErrorAction SilentlyContinue $staged
+        if ($helperBackup) {
+            try { [IO.File]::Replace($helperBackup, $helperDestination, $null) }
+            catch { Write-Warning "Could not restore the previous $helperName after activation failed: $($_.Exception.Message)" }
+        } elseif ($helperCreated) {
+            Remove-Item -LiteralPath $helperDestination -Force -ErrorAction SilentlyContinue
+        }
         throw "could not activate agent-manager.exe (is it running?); the existing installation was preserved: $($_.Exception.Message)"
     }
+    if ($helperBackup) { Remove-Item -LiteralPath $helperBackup -Force -ErrorAction SilentlyContinue }
 
     if (-not $fixture) {
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -76,5 +115,9 @@ try {
         }
     }
     Write-Host "Installed agent-manager $Version to $destination"
-    Write-Host "Next: agent-manager runtime-install`n      agent-manager doctor`n      agent-manager serve"
+    if ([version]$Version -ge [version]'2026.906.1') {
+        Write-Host "Next: agent-manager runtime-install`n      agent-manager doctor`n      agent-manager install"
+    } else {
+        Write-Host "Next: agent-manager runtime-install`n      agent-manager doctor`n      agent-manager serve"
+    }
 } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }

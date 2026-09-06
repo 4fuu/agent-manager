@@ -52,28 +52,25 @@ func TestDefinitionsPreserveArgumentsAndGuestLifetimes(t *testing.T) {
 			}
 			if platform == "windows" {
 				var task struct {
+					Command   string `xml:"Actions>Exec>Command"`
 					Arguments string `xml:"Actions>Exec>Arguments"`
 				}
 				if err := xml.Unmarshal([]byte(text), &task); err != nil {
 					t.Fatal(err)
 				}
 				args := strings.Fields(task.Arguments)
-				launcher := decodePS(t, args[len(args)-1])
-				if !strings.Contains(launcher, "$startup.CreateFlags = 16777216") || !strings.Contains(launcher, "$worker.WaitForExit()") {
+				launcher := decodePS(t, strings.Trim(args[len(args)-1], "\""))
+				if !strings.Contains(launcher, "$startup.CreateFlags = 150994944") || !strings.Contains(launcher, "$worker.WaitForExit()") {
 					t.Fatal("worker must escape the scheduler job and be supervised")
 				}
-				_, payload, ok := strings.Cut(launcher, "$payload = '")
-				if !ok {
-					t.Fatal("missing worker payload")
+				if task.Command != HostPath(r.Executable) {
+					t.Fatal("task must start the GUI-subsystem host")
 				}
-				payload, _, _ = strings.Cut(payload, "'")
-				script := decodePS(t, payload)
-				for _, value := range []string{r.Executable, r.State, r.msbHome} {
-					if !strings.Contains(script, psText(value)) {
-						t.Fatalf("lost argument %s in %s", value, script)
-					}
+				worker := windowsCommandLine(HostPath(r.Executable), r.Executable, "service-run", "--state", r.State, "--fake")
+				if !strings.Contains(launcher, "$commandLine = "+psText(worker)) || !strings.Contains(launcher, "$env:MSB_HOME="+psText(r.msbHome)) {
+					t.Fatal("lost worker arguments or environment", launcher)
 				}
-				for _, value := range []string{"InteractiveToken", "LeastPrivilege", "IgnoreNew", "<ExecutionTimeLimit>PT0S", "-WindowStyle Hidden"} {
+				for _, value := range []string{"InteractiveToken", "LeastPrivilege", "IgnoreNew", "<ExecutionTimeLimit>PT0S"} {
 					if !strings.Contains(text, value) {
 						t.Fatal("missing", value)
 					}

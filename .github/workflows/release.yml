@@ -68,6 +68,17 @@ jobs:
       - name: Build native Windows or macOS bundle
         if: runner.os != 'Linux'
         run: python script/release.py build
+      - name: Verify Windows bundle service has no console
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          AGENT_MANAGER_SERVICE_TEST: '1'
+        run: |
+          $version = (Get-Content internal/buildinfo/version.txt).Trim()
+          Expand-Archive -LiteralPath "dist/agent-manager-$version-windows-amd64.zip" -DestinationPath "$env:RUNNER_TEMP/service-bundle"
+          $env:AGENT_MANAGER_SERVICE_BINARY = "$env:RUNNER_TEMP/service-bundle/agent-manager.exe"
+          go test -v ./cmd/agent-manager -run TestNativeLoginServiceLifecycle -count=1 -timeout 6m
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build Linux bundle with Debian 12 glibc baseline
         if: runner.os == 'Linux'
         run: |

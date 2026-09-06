@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -32,13 +33,16 @@ func encodedPS(s string) string { return base64.StdEncoding.EncodeToString(utf16
 // Task Scheduler's job forbids microsandbox's mandatory detached breakaway.
 // WMI creates a same-user worker outside that job; the task waits for its exit.
 // The environment is transferred at launch, never written into the task XML.
-func taskLauncher(payload string) string {
-	return "$payload = " + psText(payload) + ";\n" + `
+func taskLauncher(commandLine, msbHome string) string {
+	env := ""
+	if msbHome != "" {
+		env = "$env:MSB_HOME=" + psText(msbHome) + ";\n"
+	}
+	return "$commandLine = " + psText(commandLine) + ";\n" + env + `
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
-$commandLine = '"' + $PSHOME + '\powershell.exe" -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ' + $payload
 $startup = ([wmiclass]'Win32_ProcessStartup').CreateInstance()
-$startup.CreateFlags = 16777216
+$startup.CreateFlags = 150994944
 $startup.ShowWindow = 0
 $startup.EnvironmentVariables = [string[]]@(Get-ChildItem Env: | ForEach-Object { $_.Name + '=' + $_.Value })
 $result = ([wmiclass]'Win32_Process').Create($commandLine, $null, $startup)
@@ -121,6 +125,34 @@ func unitText(s string) string {
 	s = strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\n", "\\n", "\r", "\\r", "\t", "\\t", "%", "%%").Replace(s)
 	return "\"" + s + "\""
 }
+
+// Quote for CreateProcess/CommandLineToArgvW, not PowerShell or cmd.exe.
+func windowsCommandLine(args ...string) string {
+	quoted := make([]string, len(args))
+	for i, arg := range args {
+		var b strings.Builder
+		b.WriteByte('"')
+		slashes := 0
+		for _, c := range arg {
+			if c == '\\' {
+				slashes++
+				continue
+			}
+			if c == '"' {
+				b.WriteString(strings.Repeat("\\", slashes*2+1))
+			} else {
+				b.WriteString(strings.Repeat("\\", slashes))
+			}
+			b.WriteRune(c)
+			slashes = 0
+		}
+		b.WriteString(strings.Repeat("\\", slashes*2))
+		b.WriteByte('"')
+		quoted[i] = b.String()
+	}
+	return strings.Join(quoted, " ")
+}
+
 func (r *registration) definition() string {
 	args := []string{r.Executable, "service-run", "--state", r.State}
 	if r.Fake {
@@ -150,17 +182,15 @@ func (r *registration) definition() string {
 		}
 		return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>" + r.name + "</string><key>ProgramArguments</key><array>" + elements.String() + "</array>" + env + "<key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>AbandonProcessGroup</key><true/><key>ExitTimeOut</key><integer>30</integer><key>ThrottleInterval</key><integer>2</integer></dict></plist>\n"
 	default:
-		quoted := make([]string, len(args))
-		for i, arg := range args {
-			quoted[i] = psText(arg)
+		host := HostPath(r.Executable)
+		worker := windowsCommandLine(append([]string{host}, args...)...)
+		command := encodedPS(taskLauncher(worker, r.msbHome))
+		root := os.Getenv("SystemRoot")
+		if root == "" {
+			root = `C:\Windows`
 		}
-		env := ""
-		if r.msbHome != "" {
-			env = "$env:MSB_HOME=" + psText(r.msbHome) + "; "
-		}
-		payload := encodedPS("$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; " + env + "& " + strings.Join(quoted, " ") + "; exit $LASTEXITCODE")
-		command := encodedPS(taskLauncher(payload))
-		return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>" + xmlText(r.account) + "</UserId></LogonTrigger></Triggers><Principals><Principal id=\"User\"><UserId>" + xmlText(r.account) + "</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure></Settings><Actions Context=\"User\"><Exec><Command>powershell.exe</Command><Arguments>-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand " + command + "</Arguments></Exec></Actions></Task>\n"
+		launcher := windowsCommandLine(filepath.Join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", command)
+		return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>" + xmlText(r.account) + "</UserId></LogonTrigger></Triggers><Principals><Principal id=\"User\"><UserId>" + xmlText(r.account) + "</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure></Settings><Actions Context=\"User\"><Exec><Command>" + xmlText(host) + "</Command><Arguments>" + xmlText(launcher) + "</Arguments></Exec></Actions></Task>\n"
 	}
 }
 func (r *registration) register() error {

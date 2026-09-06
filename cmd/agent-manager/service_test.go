@@ -13,6 +13,7 @@ import (
 
 	"github.com/4fuu/agent-manager/internal/backend"
 	"github.com/4fuu/agent-manager/internal/manager"
+	"github.com/4fuu/agent-manager/internal/service"
 	"github.com/4fuu/agent-manager/internal/supervisor"
 )
 
@@ -50,8 +51,31 @@ func TestNativeLoginServiceLifecycle(t *testing.T) {
 		// compiler DLL search path.
 		buildArgs = []string{"build", "-ldflags", "-extldflags=-static", "-o"}
 	}
-	if out, err := exec.Command("go", append(buildArgs, exe, ".")...).CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, out)
+	if published := os.Getenv("AGENT_MANAGER_SERVICE_BINARY"); published != "" {
+		files := map[string]string{published: exe}
+		if runtime.GOOS == "windows" {
+			files[service.HostPath(published)] = service.HostPath(exe)
+		}
+		for from, to := range files {
+			b, err := os.ReadFile(from)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(to, b, 0700); err != nil {
+				t.Fatal(err)
+			}
+		}
+	} else {
+		if out, err := exec.Command("go", append(buildArgs, exe, ".")...).CombinedOutput(); err != nil {
+			t.Fatalf("build: %v\n%s", err, out)
+		}
+		if runtime.GOOS == "windows" {
+			cmd := exec.Command("go", "build", "-ldflags", "-H=windowsgui -s -w", "-o", service.HostPath(exe), "../agent-manager-service")
+			cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("build GUI service host: %v\n%s", err, out)
+			}
+		}
 	}
 	state := filepath.Join(dir, "state")
 	liveImage := os.Getenv("AGENT_MANAGER_SERVICE_LIVE_IMAGE")
@@ -65,7 +89,9 @@ func TestNativeLoginServiceLifecycle(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer cancel()
 		args := append([]string{action, "--state", state}, extra...)
-		out, err := exec.CommandContext(ctx, exe, args...).CombinedOutput()
+		cmd := exec.CommandContext(ctx, exe, args...)
+		service.NoConsole(cmd)
+		out, err := cmd.CombinedOutput()
 		return string(out), err
 	}
 	defer func() {
@@ -95,6 +121,40 @@ func TestNativeLoginServiceLifecycle(t *testing.T) {
 	call("start")
 	if out := call("status"); !strings.Contains(out, "Supervisor ready: true") {
 		t.Fatal(out)
+	}
+	if runtime.GOOS == "windows" {
+		// Probe from a disposable process so the test runner keeps its console.
+		script := "$ErrorActionPreference='Stop'; $exePath='" + strings.ReplaceAll(exe, "'", "''") + "'; $path='" + strings.ReplaceAll(filepath.Join(state, "login-task.xml"), "'", "''") + "';\n" + `
+[xml]$task = Get-Content -LiteralPath $path -Raw
+$encoded = $task.Task.Actions.Exec.Arguments.Split(' ')[-1].Trim('"')
+$processes = @(Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and ($_.ExecutablePath -eq $task.Task.Actions.Exec.Command -or $_.ExecutablePath -eq $exePath -or ($_.CommandLine -and $_.CommandLine.TrimEnd('"').EndsWith($encoded))) })
+if ($processes.Count -ne 4) { throw ('Expected host, PowerShell, worker host and supervisor; found ' + $processes.Count) }
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class LauncherConsoleProbe {
+    [DllImport("kernel32.dll")] static extern bool FreeConsole();
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool AttachConsole(uint pid);
+    public static void Check(uint pid) {
+        FreeConsole();
+        if (AttachConsole(pid)) {
+            FreeConsole();
+            throw new Exception("Service process allocated a console: " + pid);
+        }
+        if (Marshal.GetLastWin32Error() != 6) throw new Exception("Console probe failed");
+    }
+}
+'@
+foreach ($process in $processes) { [LauncherConsoleProbe]::Check($process.ProcessId) }
+`
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cmd := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script)
+		service.NoConsole(cmd)
+		out, err := cmd.CombinedOutput()
+		cancel()
+		if err != nil {
+			t.Fatalf("headless launcher: %v\n%s", err, out)
+		}
 	}
 	client := supervisor.NewClient(state)
 	if _, err := client.Call(supervisor.Request{Action: "project", Project: manager.Project{Name: "retained project", URL: "https://github.com/octocat/Hello-World"}}); err != nil {

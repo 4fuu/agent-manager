@@ -78,7 +78,8 @@ manual downloads and source builds.
 ### Start the manager
 
 The managed login service commands require v2026.906.1 or later.
-Keep the executable at a stable path when using them.
+Keep the executable at a stable path when using them. On Windows, keep the bundled
+versioned `agent-manager-service-*.exe` beside it for console-free background startup.
 
 In a new terminal after installation:
 

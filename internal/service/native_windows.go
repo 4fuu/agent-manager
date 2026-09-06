@@ -2,11 +2,22 @@ package service
 
 import (
 	"os"
+	"os/exec"
+	"syscall"
 	"unsafe"
 
 	"github.com/4fuu/agent-manager/internal/privatefs"
 	"golang.org/x/sys/windows"
 )
+
+// NoConsole prevents allocation, including transient Windows Terminal windows.
+// HideWindow alone acts too late for console-subsystem processes.
+func NoConsole(cmd *exec.Cmd) {
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CreationFlags |= windows.CREATE_NO_WINDOW
+}
 
 // PrepareProcess makes new files belong to the service user. WMI can supply an
 // administrative token whose default owner is Administrators rather than its

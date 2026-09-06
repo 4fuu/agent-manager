@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import struct
 import subprocess
 import tarfile
 import tempfile
@@ -41,6 +42,32 @@ def archive_name(v, target):
     return f"agent-manager-{v}-{target}.{suffix}"
 
 
+def windows_service_name(v):
+    return f"agent-manager-service-{v}.exe"
+
+
+def pe_subsystem(path):
+    data = path.read_bytes()
+    if len(data) < 64 or data[:2] != b"MZ":
+        raise ValueError(f"not a PE executable: {path}")
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    optional = pe + 4 + 20
+    if pe + 4 > len(data) or data[pe:pe + 4] != b"PE\0\0" or optional + 70 > len(data):
+        raise ValueError(f"malformed PE executable: {path}")
+    return struct.unpack_from("<H", data, optional + 68)[0]
+
+
+def verify_windows_archive(path, v):
+    helper_name = windows_service_name(v)
+    with zipfile.ZipFile(path) as archive:
+        if helper_name not in archive.namelist():
+            raise ValueError(f"Windows archive is missing {helper_name}")
+        with tempfile.TemporaryDirectory(prefix="agent-manager-pe-check-") as tmp:
+            helper = Path(archive.extract(helper_name, tmp))
+            if pe_subsystem(helper) != 2:
+                raise ValueError(f"Windows service helper is not a GUI-subsystem executable: {helper_name}")
+
+
 def run(*args, **kwargs):
     return subprocess.run(args, cwd=ROOT, check=True, **kwargs)
 
@@ -63,6 +90,13 @@ def build(out):
         reported = run(str(exe), "--version", capture_output=True, text=True).stdout
         if not reported.startswith(f"agent-manager {v} ("):
             raise ValueError(f"unexpected binary version: {reported}")
+        if target.startswith("windows-"):
+            helper = stage / windows_service_name(v)
+            helper_env = dict(os.environ, CGO_ENABLED="0")
+            run("go", "build", "-trimpath", "-ldflags", "-H=windowsgui -s -w", "-o", str(helper),
+                "./cmd/agent-manager-service", env=helper_env)
+            if pe_subsystem(helper) != 2:
+                raise ValueError(f"Windows service helper is not a GUI-subsystem executable: {helper}")
         for name in ("LICENSE", "README.md", "AGENTS.md"):
             shutil.copy2(ROOT / name, stage / name)
         for name in ("docs", "images", "contrib"):
@@ -73,6 +107,7 @@ def build(out):
                 for file in sorted(stage.rglob("*")):
                     if file.is_file():
                         archive.write(file, file.relative_to(stage))
+            verify_windows_archive(destination, v)
         else:
             with tarfile.open(destination, "w:gz") as archive:
                 for file in sorted(stage.iterdir()):

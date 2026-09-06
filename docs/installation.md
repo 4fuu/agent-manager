@@ -35,27 +35,29 @@ Release automation generates these manifests from the final archive checksums.
 
 Download and review the installer before executing it if you want to inspect its
 behavior. Both scripts accept `latest` (default), a dated version such as
-`2026.906.0`, or its `v`-prefixed tag.
+`2026.907.0`, or its `v`-prefixed tag.
 
 Windows PowerShell 5.1 or later:
 
 ```powershell
 Invoke-WebRequest -UseBasicParsing https://raw.githubusercontent.com/4fuu/agent-manager/main/script/install.ps1 -OutFile "$env:TEMP\install-agent-manager.ps1"
-powershell -ExecutionPolicy Bypass -File "$env:TEMP\install-agent-manager.ps1" -Version 2026.906.0
+powershell -ExecutionPolicy Bypass -File "$env:TEMP\install-agent-manager.ps1" -Version 2026.907.0
 ```
 
 The default executable destination is
 `%LOCALAPPDATA%\Programs\agent-manager\agent-manager.exe`. The script adds its
 directory to the user PATH; open a new terminal afterward. Use `-InstallDir PATH`
 or `AGENT_MANAGER_INSTALL_DIR` to change it. A failed download, checksum or binary
-validation leaves the existing executable intact. Close the UI and supervisor
-before upgrading; Windows may prevent replacement of a running executable.
+validation leaves the existing executable intact. Releases beginning with
+2026.907.0 also install a versioned service helper beside the main executable;
+keep both files together. Close the UI and supervisor before upgrading; Windows
+may prevent replacement of a running executable.
 
 Linux and Apple Silicon macOS:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/4fuu/agent-manager/main/script/install.sh -o /tmp/install-agent-manager.sh
-sh /tmp/install-agent-manager.sh 2026.906.0
+sh /tmp/install-agent-manager.sh 2026.907.0
 ```
 
 The Unix installer uses `~/.local/bin`, or `AGENT_MANAGER_INSTALL_DIR` / the
@@ -140,7 +142,8 @@ state directory.
 Native registration uses:
 
 - **Windows:** an interactive-user Task Scheduler task with least privilege and a
-  hidden PowerShell/WMI launcher. Task Scheduler, Windows PowerShell and local WMI
+  GUI-subsystem host running PowerShell/WMI without allocating a console. Task
+  Scheduler, Windows PowerShell and local WMI
   process creation must be available. No elevation is normally required, although
   local policy can deny these operations. The user must be logged in for it to run.
 - **Linux:** a `systemd --user` service. A working user systemd session and user
@@ -162,10 +165,22 @@ and compare its SHA-256 with the manifest, then extract it to a directory on PAT
 Image tar files are not release assets.
 
 For a source build, install Go 1.25.1+ and a native C toolchain, then run from the
-repository root:
+repository root. On Linux and macOS:
 
 ```sh
 go build ./cmd/agent-manager
+```
+
+On Windows, also build the GUI-subsystem service helper with the exact application
+version in its filename and keep it beside `agent-manager.exe`:
+
+```powershell
+$version = (Get-Content internal/buildinfo/version.txt).Trim()
+$env:CGO_ENABLED = '1'
+go build -o agent-manager.exe ./cmd/agent-manager
+$env:CGO_ENABLED = '0'
+go build -trimpath -ldflags '-H=windowsgui -s -w' -o "agent-manager-service-$version.exe" ./cmd/agent-manager-service
+$env:CGO_ENABLED = '1'
 ```
 
 CGO must be enabled (`CGO_ENABLED=1`; in PowerShell use `$env:CGO_ENABLED='1'`).
@@ -176,7 +191,8 @@ Native release packaging uses Python 3.11+ and `python script/release.py build`.
 Stop the supervisor before upgrading, then use `scoop update agent-manager`,
 `brew upgrade agent-manager`, or rerun the standalone installer. For a managed
 login service, rerun `agent-manager install` afterward to record the new executable
-path and restart it. Existing image profiles and Sessions retain their resolved
+path and restart it. Windows upgrades must retain the versioned helper beside the
+new main executable. Existing image profiles and Sessions retain their resolved
 configuration; an application upgrade does not silently retag them.
 
 Remove the managed registration before uninstalling the application. Then use

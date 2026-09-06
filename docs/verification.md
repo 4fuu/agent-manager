@@ -127,6 +127,15 @@ checks a failed supervisor startup and recovery, then removes the registration.
 Run as the intended desktop user, with Task Scheduler/WMI, a systemd user bus or
 a macOS GUI login session available, respectively.
 
+On Windows the check builds the GUI-subsystem service host, then probes all four
+service processes (task host, PowerShell, worker host and supervisor) to reject any
+allocated console. Unit checks also verify console-free native commands and
+Windows argument quoting. Set `AGENT_MANAGER_SERVICE_BINARY` to an extracted
+release executable to test that bundle and its companion host instead of building
+from source; the release workflow does this before publishing Windows archives.
+These checks run in CI; do not repeatedly exercise native service startup on an
+active user's desktop while investigating window-creation regressions.
+
 For real guest lifetime coverage, additionally set
 `AGENT_MANAGER_SERVICE_LIVE_IMAGE=ghcr.io/4fuu/agent-manager/uri:2026.906.0` and use
 an eight-minute test timeout. This uses the real installed runtime and image

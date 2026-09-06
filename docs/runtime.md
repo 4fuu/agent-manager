@@ -42,6 +42,16 @@ in memory, not into task XML. Guest execution still goes through `internal/backe
 WMI only starts the host supervisor. Do not replace this with direct task-child
 execution or attached microVMs without rechecking native guest lifetimes.
 
+Windows releases beginning with 2026.907.0 include a versioned GUI-subsystem
+service host. Task Scheduler starts this host without a console. It runs the WMI
+launcher with `CREATE_NO_WINDOW`; WMI starts a second GUI host outside the job,
+which runs `service-run` with `CREATE_NO_WINDOW`. Service management commands also
+use this flag for PowerShell and schtasks. Hiding or detaching an already-created
+console is not equivalent: it can still flash or leave a Windows Terminal window.
+The CLI remains a console application so its interactive TUI and `serve` work
+normally. `install` validates the companion host before stopping an existing
+registration; upgrades must rerun `install` to replace the old task action.
+
 ## Images
 
 The supplied Debian Trixie recipe has local targets for URI Agent, Pi, OMP,

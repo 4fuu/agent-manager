@@ -4,6 +4,7 @@ package service
 import (
 	"context"
 	"crypto/sha256"
+	"debug/pe"
 	"errors"
 	"fmt"
 	"os"
@@ -13,8 +14,29 @@ import (
 	"strings"
 	"time"
 
+	"github.com/4fuu/agent-manager/internal/buildinfo"
 	"github.com/4fuu/agent-manager/internal/privatefs"
 )
+
+// HostPath is versioned so an installer can publish the helper before atomically
+// replacing the CLI without altering a previous release's running service host.
+func HostPath(executable string) string {
+	return filepath.Join(filepath.Dir(executable), "agent-manager-service-"+buildinfo.Version+".exe")
+}
+
+func validateHost(executable string) error {
+	path := HostPath(executable)
+	f, err := pe.Open(path)
+	if err != nil {
+		return fmt.Errorf("Windows service host unavailable at %s; reinstall the complete Windows bundle: %w", path, err)
+	}
+	defer f.Close()
+	h, ok := f.OptionalHeader.(*pe.OptionalHeader64)
+	if !ok || h.Subsystem != pe.IMAGE_SUBSYSTEM_WINDOWS_GUI || f.Machine != pe.IMAGE_FILE_MACHINE_AMD64 {
+		return fmt.Errorf("%s must be the Windows amd64 GUI-subsystem service host", path)
+	}
+	return nil
+}
 
 type Config struct {
 	State, Executable string
@@ -89,7 +111,9 @@ func newRegistration(c Config) (*registration, error) {
 func runCommand(name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	b, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, name, args...)
+	NoConsole(cmd)
+	b, err := cmd.CombinedOutput()
 	if err != nil {
 		return string(b), fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(string(b)))
 	}
@@ -99,6 +123,12 @@ func runCommand(name string, args ...string) (string, error) {
 // Control serializes registration changes for a state directory. Installation
 // never relocates state or runtime caches, and uninstall never deletes them.
 func Control(action string, c Config) (string, error) {
+	// Reject an incomplete bundle before stopping or replacing a registration.
+	if action == "install" && runtime.GOOS == "windows" {
+		if err := validateHost(c.Executable); err != nil {
+			return "", err
+		}
+	}
 	r, err := newRegistration(c)
 	if err != nil {
 		return "", err
