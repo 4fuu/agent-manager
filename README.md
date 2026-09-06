@@ -122,3 +122,19 @@ Yazi. Use Left/Right to select a column and `+`/`-` to change its width.
 Read [AGENTS.md](AGENTS.md) before changing the repository. It maps behavior to its
 owning documentation and defines the required checks. `--fake` supports synthetic
 UI and lifecycle testing; it does not verify sandbox isolation or Agent compatibility.
+
+## License
+
+Copyright (C) 2026 4fuu. Agent Manager is licensed under the
+[GNU Affero General Public License, version 3 only](LICENSE)
+(`AGPL-3.0-only`), without any warranty.
+
+Commercial use is allowed. Redistribution of covered binaries requires access to
+their Corresponding Source under the license. If you modify the program and let
+users interact with that version remotely over a network, you must offer those
+users its Corresponding Source. Private modifications do not by themselves require
+publication. See the license for the complete terms.
+
+Third-party dependencies and the Agents and tools installed in guest images retain
+their own licenses. Merely using Agent Manager to work on a repository does not
+make that repository subject to AGPL.

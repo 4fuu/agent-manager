@@ -49,6 +49,10 @@ try {
     if ($LASTEXITCODE -ne 0 -or ($reported -join "`n") -notmatch ('^agent-manager ' + [regex]::Escape($Version) + '( \(|$)')) { throw "downloaded executable failed its version test or reports the wrong version" }
 
     New-Item -ItemType Directory -Force $InstallDir | Out-Null
+    # Older releases predate the bundled license; preserve it whenever supplied.
+    if (Test-Path -LiteralPath (Join-Path $unpack 'LICENSE')) {
+        Copy-Item -LiteralPath (Join-Path $unpack 'LICENSE') -Destination (Join-Path $InstallDir 'LICENSE') -Force
+    }
     $destination = Join-Path $InstallDir "agent-manager.exe"
     $staged = Join-Path $InstallDir (".agent-manager-" + [guid]::NewGuid().ToString('N') + '.exe')
     Copy-Item $candidate $staged

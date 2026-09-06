@@ -31,6 +31,7 @@ class InstallerTests(unittest.TestCase):
         (payload / "docs").mkdir(parents=True)
         (payload / "docs" / "runtime.md").write_text("fixture\n")
         (payload / "README.md").write_text("fixture\n")
+        (payload / "LICENSE").write_text("license fixture\n")
         source = self.tmp / "main.go"
         source.write_text('package main\nimport "fmt"\nfunc main(){fmt.Println("agent-manager 2026.906.0")}\n')
         env = dict(os.environ, GOOS="windows", GOARCH="amd64", CGO_ENABLED="0")
@@ -54,6 +55,7 @@ class InstallerTests(unittest.TestCase):
             result = subprocess.run(command, env=env, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr)
         installed = install / "agent-manager.exe"
+        self.assertEqual((install / "LICENSE").read_text(), "license fixture\n")
         before = installed.read_bytes()
         (fixture / "SHA256SUMS").write_text(f"{'0'*64}  agent-manager-{VERSION}-windows-amd64.zip\n")
         result = subprocess.run(command, env=env, capture_output=True)

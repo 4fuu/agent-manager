@@ -63,7 +63,7 @@ def build(out):
         reported = run(str(exe), "--version", capture_output=True, text=True).stdout
         if not reported.startswith(f"agent-manager {v} ("):
             raise ValueError(f"unexpected binary version: {reported}")
-        for name in ("README.md", "AGENTS.md"):
+        for name in ("LICENSE", "README.md", "AGENTS.md"):
             shutil.copy2(ROOT / name, stage / name)
         for name in ("docs", "images", "contrib"):
             shutil.copytree(ROOT / name, stage / name)
@@ -113,6 +113,7 @@ def metadata(out):
     scoop = {
         "version": v, "description": "Persistent sandbox workspaces for terminal coding agents",
         "homepage": f"https://github.com/{REPO}",
+        "license": "AGPL-3.0-only",
         "notes": "Enable Windows Hypervisor Platform, then run agent-manager runtime-install and agent-manager doctor. Stop the supervisor before updating.",
         "architecture": {"64bit": {"url": f"{base}/{win}", "hash": hashes[win]}},
         "bin": "agent-manager.exe",
@@ -127,6 +128,7 @@ def metadata(out):
     formula = f'''class AgentManager < Formula
   desc "Persistent sandbox workspaces for terminal coding agents"
   homepage "https://github.com/{REPO}"
+  license "AGPL-3.0-only"
   url "{base}/{mac}"
   sha256 "{hashes[mac]}"
   version "{v}"
@@ -136,7 +138,7 @@ def metadata(out):
 
   def install
     bin.install "agent-manager"
-    doc.install "README.md", "docs", "images"
+    doc.install "LICENSE", "README.md", "docs", "images"
   end
 
   def caveats

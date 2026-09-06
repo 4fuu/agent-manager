@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-only
+# Copyright (C) 2026 4fuu
 # Git requests credentials on a private pipe; no token in argv, URL, or Git config.
 case "$1" in
   *Username*) printf '%s\n' x-access-token ;;
