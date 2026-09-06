@@ -64,6 +64,9 @@ func run() error {
 	if *fake && mode != "serve" && mode != "install" && mode != "service-run" {
 		return fmt.Errorf("--fake is only valid with serve or install")
 	}
+	if err := service.PrepareProcess(); err != nil {
+		return fmt.Errorf("prepare process: %w", err)
+	}
 	if mode == "ui" {
 		return ui.Run(supervisor.NewClient(*dir))
 	}
@@ -92,9 +95,6 @@ func run() error {
 			return supervisor.Serve(ctx, *dir, func() (*supervisor.Supervisor, error) { return supervisor.New(*dir, b) })
 		}
 		if mode == "service-run" {
-			if err := service.PrepareProcess(); err != nil {
-				return fmt.Errorf("prepare service process: %w", err)
-			}
 			if err := privatefs.EnsureDir(*dir); err != nil {
 				return err
 			}

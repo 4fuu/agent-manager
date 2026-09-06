@@ -19,9 +19,9 @@ func NoConsole(cmd *exec.Cmd) {
 	cmd.SysProcAttr.CreationFlags |= windows.CREATE_NO_WINDOW
 }
 
-// PrepareProcess makes new files belong to the service user. WMI can supply an
-// administrative token whose default owner is Administrators rather than its
-// user SID. Existing ownership and private ACL checks remain unchanged.
+// PrepareProcess makes new files belong to the current user. WMI and elevated
+// shells can supply a token whose default owner is Administrators rather than
+// its user SID. Existing ownership and private ACL checks remain unchanged.
 func PrepareProcess() error {
 	var token windows.Token
 	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY|windows.TOKEN_ADJUST_DEFAULT, &token); err != nil {
