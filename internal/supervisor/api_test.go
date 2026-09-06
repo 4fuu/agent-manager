@@ -63,7 +63,9 @@ func TestIPCOwnershipAndClientReconnect(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-	case <-time.After(2 * time.Second):
+	// Serve allows five seconds to drain HTTP connections before releasing
+	// the lifetime lock; include scheduling headroom on shared CI runners.
+	case <-time.After(10 * time.Second):
 		t.Fatal("server did not stop")
 	}
 	// The OS lock and endpoint must be reusable without deleting lock files.
@@ -86,8 +88,13 @@ func TestIPCOwnershipAndClientReconnect(t *testing.T) {
 	if err := probe.Shutdown(context.Background()); err != nil {
 		t.Fatal("graceful IPC shutdown failed", err)
 	}
-	if err := <-done; err != nil {
-		t.Fatal(err)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("server did not stop after IPC shutdown")
 	}
 	if err := probe.Probe(context.Background()); err == nil {
 		t.Fatal("stopped supervisor reported healthy")

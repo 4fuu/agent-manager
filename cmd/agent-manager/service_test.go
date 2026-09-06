@@ -43,10 +43,14 @@ func TestNativeLoginServiceLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	exe := filepath.Join(dir, "agent-manager")
+	buildArgs := []string{"build", "-o"}
 	if runtime.GOOS == "windows" {
 		exe += ".exe"
+		// Match release bundles: login tasks do not inherit the build shell's
+		// compiler DLL search path.
+		buildArgs = []string{"build", "-ldflags", "-extldflags=-static", "-o"}
 	}
-	if out, err := exec.Command("go", "build", "-o", exe, ".").CombinedOutput(); err != nil {
+	if out, err := exec.Command("go", append(buildArgs, exe, ".")...).CombinedOutput(); err != nil {
 		t.Fatalf("build: %v\n%s", err, out)
 	}
 	state := filepath.Join(dir, "state")
@@ -73,6 +77,9 @@ func TestNativeLoginServiceLifecycle(t *testing.T) {
 		t.Helper()
 		out, err := command(action, extra...)
 		if err != nil {
+			status, statusErr := command("status")
+			log, logErr := os.ReadFile(filepath.Join(state, "supervisor-service.log"))
+			t.Logf("failure status: %s (%v)\nlifecycle log: %s (%v)", status, statusErr, log, logErr)
 			t.Fatalf("%s: %v\n%s", action, err, out)
 		}
 		t.Log(action + ": " + out)
