@@ -83,3 +83,6 @@ suite. Default tests must not require live credentials or external network acces
 - Update CLI help when public commands change.
 - Record real runtime evidence separately from synthetic tests. Build or startup
   success does not establish authenticated Agent compatibility.
+- Finish every release by writing and verifying the GitHub Release Notes using
+  the [required format and completion checks](docs/release.md#release-notes-final-required-step).
+  An automated commit summary or green workflow is not the final release handoff.
